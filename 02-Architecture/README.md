@@ -1,829 +1,1181 @@
 # TriCore Architecture Deep Dive
-## Part 2 - Core Architecture, CPU Features, Safety Features, and Performance Capabilities
+### Part 2 — Core Architecture, CPU Features, Safety & Performance
+
+> **TriCore** is not a standard embedded CPU. It is a purpose-built automotive processor
+> that merges real-time control, DSP mathematics, and RISC efficiency into one unified
+> architecture — designed from day one to run safely inside a moving vehicle.
 
 ---
 
-# Table of Contents
+## Table of Contents
 
-1. Introduction
-2. TriCore Design Philosophy
-3. Why TriCore is Different
-4. CPU Core Overview
-5. Harvard Architecture
-6. RISC Architecture
-7. Register Architecture
-8. Instruction Set Architecture
-9. 16-bit and 32-bit Instructions
-10. DSP Engine
-11. SIMD Operations
-12. Multiply-Accumulate Operations
-13. Floating Point Unit (FPU)
-14. Pipeline Architecture
-15. Superscalar Execution
-16. Branch Prediction
-17. Memory Architecture
-18. Cache Architecture
-19. Memory Protection Unit (MPU)
-20. Privilege Levels
-21. Interrupt System Overview
-22. Trap System Overview
-23. Multi-Core Processing
-24. Inter-Core Communication
-25. Lockstep Safety
-26. Functional Safety Features
-27. Security Features
-28. Watchdogs
-29. Communication Capabilities
-30. Automotive Advantages
-31. Comparison with ARM Cortex-M
-32. Summary
-
----
-
-# 1. Introduction
-
-TriCore is Infineon's proprietary processor architecture used in the AURIX family of automotive microcontrollers.
-
-Unlike many embedded processors that focus only on control applications, TriCore was designed to provide:
-
-- High computational performance
-- Deterministic real-time behavior
-- DSP processing capability
-- Functional safety
-- Automotive-grade reliability
-
-The architecture combines three major computing concepts into a single CPU design.
+| # | Topic |
+|---|---|
+| 1 | [Introduction](#1--introduction) |
+| 2 | [TriCore Design Philosophy](#2--tricore-design-philosophy) |
+| 3 | [Why TriCore is Different](#3--why-tricore-is-different) |
+| 4 | [CPU Core Overview](#4--cpu-core-overview) |
+| 5 | [Harvard Architecture](#5--harvard-architecture) |
+| 6 | [RISC Architecture](#6--risc-architecture) |
+| 7 | [Register Architecture](#7--register-architecture) |
+| 8 | [Instruction Set Architecture](#8--instruction-set-architecture) |
+| 9 | [16-bit and 32-bit Instructions](#9--16-bit-and-32-bit-instructions) |
+| 10 | [DSP Engine](#10--dsp-engine) |
+| 11 | [SIMD Operations](#11--simd-operations) |
+| 12 | [Multiply-Accumulate (MAC)](#12--multiply-accumulate-mac-operations) |
+| 13 | [Floating Point Unit (FPU)](#13--floating-point-unit-fpu) |
+| 14 | [Pipeline Architecture](#14--pipeline-architecture) |
+| 15 | [Superscalar Execution](#15--superscalar-execution) |
+| 16 | [Branch Prediction](#16--branch-prediction) |
+| 17 | [Memory Architecture](#17--memory-architecture) |
+| 18 | [Cache Architecture](#18--cache-architecture) |
+| 19 | [Memory Protection Unit (MPU)](#19--memory-protection-unit-mpu) |
+| 20 | [Privilege Levels](#20--privilege-levels) |
+| 21 | [Interrupt System Overview](#21--interrupt-system-overview) |
+| 22 | [Trap System Overview](#22--trap-system-overview) |
+| 23 | [Multi-Core Processing](#23--multi-core-processing) |
+| 24 | [Inter-Core Communication](#24--inter-core-communication) |
+| 25 | [Lockstep Safety](#25--lockstep-safety) |
+| 26 | [Functional Safety Features](#26--functional-safety-features) |
+| 27 | [Security Features](#27--security-features) |
+| 28 | [Watchdogs](#28--watchdogs) |
+| 29 | [Communication Capabilities](#29--communication-capabilities) |
+| 30 | [Automotive Advantages](#30--automotive-advantages) |
+| 31 | [TriCore vs ARM Cortex-M](#31--tricore-vs-arm-cortex-m) |
+| 32 | [Summary](#32--summary) |
 
 ---
 
-# 2. TriCore Design Philosophy
+## 1 · Introduction
 
-TriCore combines:
+TriCore is Infineon's proprietary processor architecture — the CPU heart of every AURIX
+microcontroller. It was not adapted from a general-purpose design; it was built
+specifically for automotive embedded systems where the following properties are
+**non-negotiable**:
 
-    +----------------------+
-    |      TriCore         |
-    +----------------------+
-           /   |   \
-          /    |    \
-         v     v     v
-
-      MCU    DSP   RISC
-
-MCU:
-- Real-time control
-
-DSP:
-- Fast mathematical processing
-
-RISC:
-- High-performance instruction execution
-
-Goal:
-
-    High Performance
-           +
-    Real-Time Determinism
-           +
-    Functional Safety
+| Property | What It Means in a Vehicle |
+|---|---|
+| **High computational performance** | Motor control, sensor fusion, radar need heavy math |
+| **Deterministic real-time behavior** | A brake command must respond in microseconds, every time |
+| **DSP processing capability** | Signal filtering and motor FOC algorithms need MAC hardware |
+| **Functional safety** | A CPU bug must never silently command the wrong torque |
+| **Automotive-grade reliability** | Operates from −40 °C to +150 °C across 15+ years |
 
 ---
 
-# 3. Why TriCore is Different
+## 2 · TriCore Design Philosophy
 
-Traditional embedded processors focus primarily on:
+TriCore unifies three historically separate processor concepts into a **single CPU core**:
 
-- GPIO control
-- Timers
-- Communication
+```
+                    ┌──────────────────────────┐
+                    │         TriCore          │
+                    │      CPU Architecture    │
+                    └────────────┬─────────────┘
+                                 │
+            ┌────────────────────┼────────────────────┐
+            │                   │                    │
+            ▼                   ▼                    ▼
+   ┌─────────────────┐ ┌─────────────────┐ ┌─────────────────┐
+   │      MCU        │ │      DSP        │ │      RISC       │
+   │                 │ │                 │ │                 │
+   │ Real-time I/O   │ │ Fast math       │ │ High-throughput │
+   │ Interrupt ctrl  │ │ MAC operations  │ │ instruction     │
+   │ Peripheral mgmt │ │ SIMD, filtering │ │ execution       │
+   │ Timer control   │ │ Motor control   │ │ Compiler-       │
+   │                 │ │ algorithms      │ │ friendly ISA    │
+   └─────────────────┘ └─────────────────┘ └─────────────────┘
+```
 
-Automotive systems require much more:
+### The Three Design Goals
 
-- Motor control
-- Sensor fusion
-- Radar processing
-- Safety monitoring
-- Vehicle networking
-
-TriCore was built specifically for these requirements.
-
----
-
-# 4. CPU Core Overview
-
-A TriCore CPU includes:
-
-    +----------------------+
-    |      TriCore CPU     |
-    +----------------------+
-             |
-    -------------------
-    |        |        |
-    v        v        v
-
- Registers  ALU     DSP Unit
-
-             |
-             v
-
-        Memory System
-
-The CPU is optimized for both control and computational workloads.
+```
+  ┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
+  │  HIGH PERFORMANCE│   │REAL-TIME DETERMIN│   │ FUNCTIONAL SAFETY│
+  │                  │   │     ISM          │   │                  │
+  │  Process-heavy   │   │  Every deadline  │   │  Every fault     │
+  │  automotive      │   │  must be met     │   │  must be caught  │
+  │  algorithms at   │   │  with guaranteed │   │  before it       │
+  │  MCU convenience │   │  worst-case      │   │  becomes a       │
+  │                  │   │  timing          │   │  danger          │
+  └──────────────────┘   └──────────────────┘   └──────────────────┘
+```
 
 ---
 
-# 5. Harvard Architecture
+## 3 · Why TriCore is Different
 
-TriCore uses a Harvard architecture.
+### What a Generic Embedded Processor Covers
 
-Separate paths exist for:
+```
+  GPIO control
+  Basic timers
+  UART / SPI / I2C
+  Simple ADC reads
+```
 
-    Instruction Fetch
+### What Automotive Systems Actually Demand
 
-and
+```
+  ┌──────────────────────────────────────────────────────┐
+  │           Automotive Processing Demands              │
+  │                                                      │
+  │  ⚡ EV Motor Control    → FOC algorithm, PWM, ADC    │
+  │  📡 Radar Processing    → FFT, CFAR, SIMD math       │
+  │  🔋 Battery Management  → Coulomb counting, models   │
+  │  🛡️  Safety Monitoring   → Lockstep, ECC, watchdogs  │
+  │  🌐 Vehicle Networking  → CAN FD, Ethernet, FlexRay  │
+  │  🤖 Sensor Fusion       → Kalman filters, matrix ops │
+  └──────────────────────────────────────────────────────┘
+```
 
-    Data Access
-
-Diagram:
-
-    Instruction Memory
-            |
-            v
-
-          CPU
-
-            ^
-            |
-      Data Memory
-
-Benefits:
-
-- Higher throughput
-- Reduced bottlenecks
-- Improved performance
-
-The CPU can fetch instructions and access data simultaneously.
+A standard Cortex-M cannot cover all of these at the required performance and safety
+levels. TriCore was built precisely for this gap.
 
 ---
 
-# 6. RISC Architecture
+## 4 · CPU Core Overview
 
-TriCore follows RISC principles.
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                    TriCore CPU Core                      │
+  │                                                          │
+  │   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐   │
+  │   │  Register   │   │    ALU      │   │  DSP Unit   │   │
+  │   │    File     │   │             │   │             │   │
+  │   │  D0–D15     │   │ Arithmetic  │   │ MAC, SIMD   │   │
+  │   │  A0–A15     │   │ Logic ops   │   │ Saturation  │   │
+  │   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘   │
+  │          │                 │                  │          │
+  │          └─────────────────┼──────────────────┘          │
+  │                            │                             │
+  │                     ┌──────▼──────┐                      │
+  │                     │   Pipeline  │                      │
+  │                     │  (5-stage)  │                      │
+  │                     └──────┬──────┘                      │
+  │                            │                             │
+  │                     ┌──────▼──────┐                      │
+  │                     │ Memory Sys  │                      │
+  │                     │ Cache + MPU │                      │
+  │                     └─────────────┘                      │
+  └──────────────────────────────────────────────────────────┘
+```
 
-Characteristics:
-
-- Simple instructions
-- Fixed execution behavior
-- Efficient pipelining
-- Compiler-friendly design
-
-Advantages:
-
-- Predictable timing
-- Easier optimization
-- Faster execution
-
----
-
-# 7. Register Architecture
-
-TriCore uses two primary register groups.
-
----
-
-## Data Registers
-
-    D0 - D15
-
-Purpose:
-
-- Arithmetic
-- Logic operations
-- DSP calculations
-
-Example:
-
-    D0
-    D1
-    D2
-    ...
-    D15
+The CPU is optimized for **both control workloads** (interrupt handling, I/O management)
+and **computational workloads** (signal processing, motor control math).
 
 ---
 
-## Address Registers
+## 5 · Harvard Architecture
 
-    A0 - A15
+TriCore uses a **modified Harvard architecture**, meaning instruction fetch and data
+access use **physically separate buses**.
 
-Purpose:
+```
+  ┌──────────────────┐          ┌──────────────────┐
+  │  Instruction     │          │   Data Memory    │
+  │  Memory (Flash)  │          │   (SRAM, PFLASH) │
+  └────────┬─────────┘          └────────┬─────────┘
+           │                             │
+           │  Instruction bus            │  Data bus
+           │                             │
+           └──────────────┬──────────────┘
+                          │
+                   ┌──────▼──────┐
+                   │ TriCore CPU │
+                   └─────────────┘
+```
 
-- Pointers
-- Memory access
-- Stack operations
+### Why This Matters
 
-Example:
+| Von Neumann | Harvard (TriCore) |
+|---|---|
+| One bus for instructions + data | Separate buses for each |
+| Instructions and data compete for bandwidth | Simultaneous fetch + data access |
+| Lower peak throughput | Higher throughput, no bottleneck |
 
-    A0
-    A1
-    A2
-    ...
-    A15
-
----
-
-# Why Separate Registers?
-
-Many processors use the same registers for:
-
-- Data
-- Addresses
-
-TriCore separates them.
-
-Benefits:
-
-- Better optimization
-- Reduced instruction overhead
-- Improved parallel execution
+> The CPU can **fetch the next instruction** and **read/write data** for the current
+> instruction at the **same time** — eliminating memory bus contention.
 
 ---
 
-# 8. Instruction Set Architecture
+## 6 · RISC Architecture
 
-TriCore provides instructions for:
+TriCore follows RISC (Reduced Instruction Set Computer) principles:
 
-- Arithmetic
-- Logic
-- Branching
-- Memory access
-- DSP operations
-- Floating point operations
+```
+  RISC Design Principles in TriCore
+  ──────────────────────────────────────────────────────────
+  ✓ Simple, uniform instruction formats
+  ✓ Load/store architecture (math on registers, not memory)
+  ✓ Fixed and predictable execution timing
+  ✓ Efficient pipelining (one instruction per stage)
+  ✓ Compiler-friendly register model
+```
 
-Categories:
+### Benefit for Automotive Systems
 
-    Arithmetic
-    Logical
-    Branch
-    Load/Store
-    DSP
-    System
-
----
-
-# 9. 16-bit and 32-bit Instructions
-
-TriCore supports mixed instruction lengths.
-
-    16-bit Instructions
-
-and
-
-    32-bit Instructions
-
-Benefits:
-
-- Reduced code size
-- Better cache utilization
-- Lower memory consumption
-
-Example:
-
-    Smaller code
-          ↓
-    Better Flash usage
-          ↓
-    Lower cost systems
+```
+  Predictable instruction timing
+           │
+           ▼
+  Predictable interrupt latency
+           │
+           ▼
+  Deterministic real-time behavior
+           │
+           ▼
+  Safety requirements can be verified
+```
 
 ---
 
-# 10. DSP Engine
+## 7 · Register Architecture
 
-One of TriCore's strongest features.
+TriCore uses **two completely separate register files** — a deliberate architectural
+choice that enables better parallelism and compiler optimization.
 
-DSP capabilities include:
+### Data Registers — `D0` to `D15`
 
-- Filtering
-- Signal processing
-- Motor control
-- Sensor fusion
+```
+  ┌────┬────┬────┬────┬────┬────┬────┬────┐
+  │ D0 │ D1 │ D2 │ D3 │ D4 │ D5 │ D6 │ D7 │  32-bit general purpose
+  ├────┼────┼────┼────┼────┼────┼────┼────┤
+  │ D8 │ D9 │D10 │D11 │D12 │D13 │D14 │D15 │  data registers
+  └────┴────┴────┴────┴────┴────┴────┴────┘
 
-Used heavily in:
+  Purpose: Arithmetic · Logic · DSP calculations · Return values
+```
 
-- Electric vehicles
-- Radar systems
-- Industrial control
+### Address Registers — `A0` to `A15`
 
----
+```
+  ┌────┬────┬────┬────┬────┬────┬────┬────┐
+  │ A0 │ A1 │ A2 │ A3 │ A4 │ A5 │ A6 │ A7 │  32-bit address/pointer
+  ├────┼────┼────┼────┼────┼────┼────┼────┤
+  │ A8 │ A9 │A10 │A11 │A12 │A13 │A14 │A15 │  registers
+  └────┴────┴────┴────┴────┴────┴────┴────┘
 
-# 11. SIMD Operations
+  Purpose: Pointers · Memory addressing · Stack (A10=SP) · Return addr (A11)
+```
 
-SIMD:
+### Special-Purpose Registers
 
-    Single Instruction
-            Multiple
-              Data
+```
+  PSW   — Program Status Word (flags, privilege, call depth)
+  PC    — Program Counter
+  PCXI  — Previous Context Pointer (interrupt/call chain)
+  FCX   — Free Context List head
+  LCX   — Last Context List entry
+```
 
-Concept:
+### Why Separate Data and Address Registers?
 
-    One instruction
-            |
-            v
+```
+  Combined register file (ARM Cortex-M)    Separate files (TriCore)
+  ────────────────────────────────         ─────────────────────────
+  R0–R15 used for both data & addr    →    D0–D15: only data
+                                           A0–A15: only addresses
 
-    Multiple calculations
-
-Example:
-
-Without SIMD
-
-    A1 + B1
-    A2 + B2
-    A3 + B3
-    A4 + B4
-
-Four operations.
-
-With SIMD:
-
-    Single instruction
-
-Performs all calculations together.
-
-Benefits:
-
-- Faster execution
-- Better efficiency
-- Lower CPU load
+  Consequence:                             Consequence:
+  Compiler must carefully allocate    →    Compiler freely allocates
+  registers across both uses               each type independently
+  → More register spills to stack          → Fewer spills, better code
+```
 
 ---
 
-# 12. Multiply-Accumulate Operations
+## 8 · Instruction Set Architecture
 
-MAC operation:
+TriCore's ISA provides six instruction categories:
 
-    Result += A × B
-
-Very common in:
-
-- Digital filters
-- Motor control
-- Radar algorithms
-- Control systems
-
-Dedicated hardware performs these operations efficiently.
-
-Benefits:
-
-- Lower latency
-- Higher throughput
+```
+  ┌───────────────┬───────────────────────────────────────────────┐
+  │ Category      │ Examples                                      │
+  ├───────────────┼───────────────────────────────────────────────┤
+  │ Arithmetic    │ ADD, SUB, MUL, DIV, ABS, NEG                 │
+  │ Logical       │ AND, OR, XOR, NOT, shift, rotate              │
+  │ Branch        │ JEQ, JNE, JLT, CALL, RET, JA, LOOP          │
+  │ Load / Store  │ LD.W, ST.W, LD.B, ST.B, LD.D (64-bit pair)  │
+  │ DSP           │ MADD, MSUB, MUL.H, MULR.H, DVINIT           │
+  │ System        │ ENABLE, DISABLE, MTCR, MFCR, SYSCALL, RFE   │
+  └───────────────┴───────────────────────────────────────────────┘
+```
 
 ---
 
-# 13. Floating Point Unit (FPU)
+## 9 · 16-bit and 32-bit Instructions
 
-Many TriCore devices include hardware floating point support.
+TriCore supports a **mixed-width instruction set** — instructions are either 16 or 32 bits
+wide, and the CPU determines the width from the opcode.
 
-Supports:
+```
+  32-bit instruction  →  Full operand flexibility
+  ┌────────────────────────────────┐
+  │  opcode │  reg  │  reg  │ imm  │  = 4 bytes
+  └────────────────────────────────┘
 
-- Single precision
-- Enhanced support in newer generations
+  16-bit instruction  →  Common operations, compact encoding
+  ┌────────────────────┐
+  │  opcode │  reg  │   │  = 2 bytes
+  └────────────────────┘
+```
 
-Applications:
+### Impact on Code Density
 
-- Vehicle dynamics
-- Sensor calculations
-- Mathematical models
+```
+  Same program logic:
 
-Benefits:
+  32-bit only ISA            Mixed 16/32-bit (TriCore)
+  ─────────────────          ──────────────────────────
+  100 instructions           ~65 instructions (avg)
+  × 4 bytes each             × ~2.6 bytes (mixed)
+  = 400 bytes Flash          = ~169 bytes Flash
 
-- Faster calculations
-- Reduced software overhead
-
----
-
-# 14. Pipeline Architecture
-
-The CPU executes instructions using a pipeline.
-
-Simplified view:
-
-    Fetch
-      |
-      v
-    Decode
-      |
-      v
-    Execute
-      |
-      v
-    Write Back
-
-Multiple instructions can exist in different stages simultaneously.
-
-Benefits:
-
-- Increased performance
-- Better CPU utilization
+  Result: TriCore programs use significantly less Flash
+  → Enables lower-cost devices and better cache hit rate
+```
 
 ---
 
-# 15. Superscalar Execution
+## 10 · DSP Engine
 
-Modern TriCore versions support superscalar execution.
+The DSP engine is one of TriCore's **most powerful differentiators** from standard
+microcontrollers.
 
-Concept:
+### What the DSP Engine Handles
 
-    Execute multiple instructions
-    during the same cycle
+```
+  ┌─────────────────────────────────────────────────────┐
+  │                  DSP Engine Usage                   │
+  │                                                     │
+  │  🔁 Digital Filters    FIR, IIR — audio, sensor     │
+  │  ⚡ Motor Control      FOC, SVPWM — EV drivetrains  │
+  │  📡 Radar Processing   Range/velocity estimation    │
+  │  🔋 BMS Algorithms     SOC/SOH estimation models    │
+  │  🤖 Sensor Fusion      Kalman filter updates        │
+  └─────────────────────────────────────────────────────┘
+```
 
-Example:
+### Without a DSP Engine
 
-Cycle 1
+```
+  FIR filter, 32 taps, software-only on Cortex-M4:
+  ~32 multiplications + 32 additions = 64+ instructions per sample
+  → CPU heavily loaded, less time for control tasks
+```
 
-    Instruction A
-    Instruction B
+### With TriCore DSP Engine
 
-Cycle 2
-
-    Instruction C
-    Instruction D
-
-Benefits:
-
-- Higher throughput
-- Better performance
-
----
-
-# 16. Branch Prediction
-
-Branches can reduce pipeline efficiency.
-
-TriCore includes mechanisms to improve branch handling.
-
-Benefits:
-
-- Fewer pipeline stalls
-- Improved execution speed
-
-Especially important for:
-
-- Control software
-- Real-time algorithms
+```
+  Same FIR filter using MADD instructions:
+  → Completed in far fewer cycles
+  → CPU freed for other real-time tasks
+```
 
 ---
 
-# 17. Memory Architecture
+## 11 · SIMD Operations
 
-Typical memory layout:
+**SIMD** = **S**ingle **I**nstruction, **M**ultiple **D**ata
 
-    +------------------+
-    | Program Flash    |
-    +------------------+
+A single instruction operates on **multiple data elements packed into one register**.
 
-    +------------------+
-    | Data Flash       |
-    +------------------+
+### Concept
 
-    +------------------+
-    | SRAM             |
-    +------------------+
+```
+  Without SIMD (scalar):           With SIMD (packed 16-bit):
+  ────────────────────             ──────────────────────────
 
-    +------------------+
-    | Peripheral Space |
-    +------------------+
+  ADD  D1, D2   → A₁+B₁           One instruction:
+  ADD  D3, D4   → A₂+B₂           PADD.H  D0, D1
+  ADD  D5, D6   → A₃+B₃
+  ADD  D7, D8   → A₄+B₄           Operates on register packed as:
+                                   ┌──────────┬──────────┐
+  4 instructions                   │  A₁ (16) │  A₂ (16) │  D0
+                                   └──────────┴──────────┘
+                                   ┌──────────┬──────────┐
+                                        +          +
+                                   ┌──────────┬──────────┐
+                                   │  B₁ (16) │  B₂ (16) │  D1
+                                   └──────────┴──────────┘
+                                   = 2 parallel additions
+                                     in 1 instruction
+```
 
-Designed for high-speed access.
+### Automotive Use Case
 
----
-
-# 18. Cache Architecture
-
-Many AURIX devices include caches.
-
-Types:
-
-- Instruction Cache
-- Data Cache
-
-Benefits:
-
-- Faster execution
-- Reduced memory latency
-
-Especially important in:
-
-- Multi-core systems
-- Large applications
+Signal processing routines (e.g., phase current sampling in motor control) benefit
+directly from SIMD — multiple channel samples processed per instruction.
 
 ---
 
-# 19. Memory Protection Unit (MPU)
+## 12 · Multiply-Accumulate (MAC) Operations
 
-The MPU protects memory regions.
+The MAC operation is the **most frequently executed operation** in DSP algorithms:
 
-Capabilities:
+```
+  accumulator += A × B
+```
 
-- Read protection
-- Write protection
-- Execute protection
+### Hardware MAC vs Software MAC
 
-Example:
+```
+  Software MAC (no hardware):         Hardware MAC (TriCore):
+  ─────────────────────────           ──────────────────────
+  LOAD  A                             MADD  result, acc, A, B
+  LOAD  B
+  MUL   A × B                        → 1 instruction
+  ADD   result to accumulator         → Single cycle (pipelined)
+  STORE accumulator
 
-    Region A
-      |
-      +--> Read Only
+  → 5+ instructions
+  → Multiple cycles
+```
 
-    Region B
-      |
-      +--> No Access
+### Where MACs Are Used
 
-Benefits:
-
-- Improved safety
-- Fault containment
-
----
-
-# 20. Privilege Levels
-
-TriCore supports protected execution.
-
-Modes:
-
-    Supervisor Mode
-
-and
-
-    User Mode
-
-Supervisor:
-
-- Full access
-
-User:
-
-- Restricted access
-
-Benefits:
-
-- Increased reliability
-- Improved security
+| Algorithm | MAC Operations Per Cycle |
+|---|---|
+| FIR filter (N taps) | N multiply-accumulates per sample |
+| FOC motor control | Current vector rotation, PI controller |
+| Kalman filter | Matrix multiply (many MACs) |
+| Radar CFAR | Cell averaging across range bins |
 
 ---
 
-# 21. Interrupt System Overview
+## 13 · Floating Point Unit (FPU)
 
-Interrupts allow immediate response to events.
+Select TriCore devices include a hardware **FPU** for IEEE 754 single-precision
+floating-point arithmetic.
 
-Examples:
+```
+  Without FPU (software emulation):
+  ───────────────────────────────────
+  float x = a * b;
+  → Compiler generates ~10–20 instructions
+  → Tens of cycles per operation
 
-- CAN Message
-- Timer Expiration
-- ADC Conversion
+  With hardware FPU:
+  ──────────────────
+  float x = a * b;
+  → 1 FPU instruction
+  → 1–4 cycles (pipelined)
+```
 
-Characteristics:
+### FPU Applications in Automotive
 
-- Prioritized
-- Fast response
-- Deterministic behavior
+```
+  Vehicle dynamics modeling     →  Position, velocity, acceleration
+  Battery state estimation      →  SOC / SOH floating-point models
+  Sensor calibration            →  Temperature compensation curves
+  ADAS coordinate transforms    →  Camera / radar coordinate systems
+```
 
-A detailed study of interrupt handling and context management will be covered separately.
-
----
-
-# 22. Trap System Overview
-
-A trap is similar to an exception.
-
-Examples:
-
-- Illegal instruction
-- Memory violation
-- Arithmetic fault
-
-Purpose:
-
-- Error detection
-- Fault handling
-
-Traps are essential for safety-critical applications.
+> ⚠️ Note: Not all TriCore variants include an FPU. Always check the device-specific
+> User Manual for FPU availability.
 
 ---
 
-# 23. Multi-Core Processing
+## 14 · Pipeline Architecture
 
-AURIX devices may contain multiple TriCore CPUs.
+TriCore executes instructions through a **multi-stage pipeline** that allows several
+instructions to be in-flight simultaneously.
 
-Example:
+```
+                 Cycle:   1    2    3    4    5    6    7
+                          │    │    │    │    │    │    │
+  Instruction A:        [IF] [ID] [EX] [MA] [WB]
+  Instruction B:             [IF] [ID] [EX] [MA] [WB]
+  Instruction C:                  [IF] [ID] [EX] [MA] [WB]
+  Instruction D:                       [IF] [ID] [EX] [MA] [WB]
 
-    CPU0
-    CPU1
-    CPU2
-    CPU3
-    CPU4
-    CPU5
+  Stages:
+  IF  — Instruction Fetch   (read from cache/Flash)
+  ID  — Instruction Decode  (identify operation, read registers)
+  EX  — Execute             (ALU / DSP operation)
+  MA  — Memory Access       (load/store if needed)
+  WB  — Write Back          (write result to register)
+```
 
-Benefits:
+### Pipeline Benefit
 
-- Parallel execution
-- Workload separation
-- Increased performance
-
----
-
-# 24. Inter-Core Communication
-
-Multiple cores must exchange information.
-
-Methods:
-
-- Shared memory
-- Interrupts
-- Synchronization mechanisms
-
-Applications:
-
-    CPU0 → Control
-
-    CPU1 → Communications
-
-    CPU2 → Diagnostics
+Without pipelining, each instruction would require 5 cycles sequentially.
+With pipelining, the CPU **completes one instruction per cycle** in steady state.
 
 ---
 
-# 25. Lockstep Safety
+## 15 · Superscalar Execution
 
-Critical automotive systems often require redundancy.
+Modern TriCore implementations support **superscalar** execution — issuing more than one
+instruction per clock cycle.
 
-Lockstep operation:
+```
+  Scalar (1 instruction/cycle):
+  ─────────────────────────────
+  Cycle 1:  Instruction A
+  Cycle 2:  Instruction B
+  Cycle 3:  Instruction C
+  Cycle 4:  Instruction D
 
-    Core A
+  Superscalar (2 instructions/cycle, when independent):
+  ──────────────────────────────────────────────────────
+  Cycle 1:  Instruction A  +  Instruction B  (parallel)
+  Cycle 2:  Instruction C  +  Instruction D  (parallel)
+```
 
-        ||
+### Requirement for Superscalar
 
-    Core B
-
-Both execute identical instructions.
-
-Results are continuously compared.
-
-If mismatch occurs:
-
-    Fault Detected
-
-Applications:
-
-- Braking
-- Steering
-- Airbags
+Instructions must be **independent** — no data dependency between them. The compiler
+and hardware scheduler reorder and pair instructions to maximize utilization.
 
 ---
 
-# 26. Functional Safety Features
+## 16 · Branch Prediction
 
-Safety features include:
+Branches (if/else, loops) disrupt the pipeline because the next instruction to fetch
+is not known until the branch is evaluated.
 
-- Lockstep operation
-- Memory protection
-- Fault monitoring
-- Error correction
-- Watchdogs
+```
+  Without branch prediction:
+  ──────────────────────────
+  Branch instruction in EX stage
+        │
+        ▼
+  Pipeline must stall (or flush wrongly-fetched instructions)
+        │
+        ▼
+  Wasted cycles (pipeline bubbles)
 
-Supports:
+  With branch prediction:
+  ───────────────────────
+  CPU guesses the branch outcome
+        │
+        ▼
+  Continues fetching predicted path
+        │
+  ┌─────┴──────┐
+  │            │
+Correct      Wrong prediction
+  │            │
+Continue     Flush + refetch correct path
+             (penalty cycles)
+```
 
-ISO 26262
-
-Up to:
-
-ASIL-D
-
----
-
-# 27. Security Features
-
-Modern vehicles require cybersecurity.
-
-Features may include:
-
-- Secure boot
-- Hardware encryption
-- Secure key storage
-- Authentication
-
-Benefits:
-
-- Prevent unauthorized software
-- Protect vehicle systems
+> TriCore includes branch prediction mechanisms to minimize these stalls — critical for
+> tight control loops with many conditional checks.
 
 ---
 
-# 28. Watchdogs
+## 17 · Memory Architecture
 
-Watchdogs monitor software execution.
+AURIX memory is organized into well-defined regions accessible by the TriCore CPU:
 
-Types:
-
-- CPU Watchdog
-- Safety Watchdog
-
-Purpose:
-
-If software fails:
-
-    Watchdog Timeout
-            |
-            v
-        Recovery Action
-
-Benefits:
-
-- Increased reliability
-- Improved fault detection
-
----
-
-# 29. Communication Capabilities
-
-AURIX devices provide extensive communication support.
-
-Common interfaces:
-
-- CAN
-- CAN FD
-- Ethernet
-- SPI
-- UART
-- I2C
-- FlexRay
-
-Applications:
-
-- Vehicle networking
-- Diagnostics
-- Gateway ECUs
+```
+  ┌─────────────────────────────────────────────────┐
+  │                AURIX Memory Map                 │
+  │                                                 │
+  │  ┌─────────────────────────────────────────┐    │
+  │  │  Program Flash (PFlash)                 │    │
+  │  │  Read-only code and constants           │    │
+  │  │  ECC protected · Up to several MB       │    │
+  │  └─────────────────────────────────────────┘    │
+  │                                                 │
+  │  ┌─────────────────────────────────────────┐    │
+  │  │  Data Flash (DFlash / EEPROM emulation) │    │
+  │  │  Non-volatile parameter storage         │    │
+  │  │  Calibration data, NVM records          │    │
+  │  └─────────────────────────────────────────┘    │
+  │                                                 │
+  │  ┌─────────────────────────────────────────┐    │
+  │  │  SRAM (Local + Global)                  │    │
+  │  │  Stack, heap, run-time data             │    │
+  │  │  ECC protected                          │    │
+  │  └─────────────────────────────────────────┘    │
+  │                                                 │
+  │  ┌─────────────────────────────────────────┐    │
+  │  │  Peripheral Register Space (SFR)        │    │
+  │  │  Memory-mapped peripheral control regs  │    │
+  │  └─────────────────────────────────────────┘    │
+  └─────────────────────────────────────────────────┘
+```
 
 ---
 
-# 30. Automotive Advantages
+## 18 · Cache Architecture
 
-Why automotive companies choose TriCore:
+AURIX devices include **separate instruction and data caches** per CPU core, reducing
+effective memory access latency.
 
-✓ Functional Safety
+```
+  ┌──────────────────────────────────────────────────┐
+  │                  CPU Core                        │
+  │                                                  │
+  │   ┌──────────────────┐  ┌──────────────────┐    │
+  │   │  I-Cache         │  │  D-Cache         │    │
+  │   │  Instruction     │  │  Data cache      │    │
+  │   │  cache           │  │                  │    │
+  │   │  (Program Flash) │  │  (SRAM reads)    │    │
+  │   └────────┬─────────┘  └────────┬─────────┘    │
+  │            │                     │               │
+  │            └──────────┬──────────┘               │
+  │                       │                          │
+  └───────────────────────┼──────────────────────────┘
+                          │
+                   ┌──────▼──────┐
+                   │   Memory    │
+                   │  Bus / LMU  │
+                   └─────────────┘
+```
 
-✓ Deterministic Execution
+### Cache Performance Impact
 
-✓ DSP Performance
+```
+  Flash access without cache:  ~5–10 wait states at 300 MHz
+  Flash access with I-Cache:   ~0 wait states (cache hit)
 
-✓ Multi-Core Scalability
-
-✓ Cybersecurity
-
-✓ Real-Time Processing
-
-✓ Automotive Qualification
+  → 5–10× effective throughput improvement on code execution
+```
 
 ---
 
-# 31. Comparison with ARM Cortex-M
+## 19 · Memory Protection Unit (MPU)
 
-| Feature | Cortex-M7 | TriCore |
-|----------|-----------|----------|
-| Target Market | General Embedded | Automotive |
-| DSP Support | Extensions | Native Design |
-| Lockstep | Rare | Common |
-| Multi-Core | Limited | Extensive |
-| Safety Features | Optional | Core Requirement |
-| AUTOSAR Usage | Moderate | Extensive |
-| CAN FD Support | Some Devices | Extensive |
-| Functional Safety | Moderate | ASIL-D Focused |
+The MPU enforces **access rights** on memory regions, preventing tasks or cores from
+corrupting each other's memory.
+
+```
+  ┌────────────────────────────────────────────────┐
+  │              MPU Region Configuration          │
+  │                                                │
+  │  Region 0: Flash (read + execute, no write)    │
+  │  Region 1: OS kernel stack (read/write)        │
+  │  Region 2: Task A private data (read/write)    │
+  │  Region 3: Task B private data (read/write)    │
+  │  Region 4: Shared mailbox (read only for Task A│
+  │  Region 5: Peripheral SFRs (supervisor only)   │
+  │  Region 6: Safety variables (no user access)   │
+  └────────────────────────────────────────────────┘
+```
+
+### What Happens on a Violation?
+
+```
+  Task A attempts write to Task B's private region
+                    │
+                    ▼
+           MPU detects violation
+                    │
+                    ▼
+           Trap generated (Class 4)
+                    │
+                    ▼
+           OS trap handler invoked
+                    │
+                    ▼
+           Faulting task terminated / logged
+```
+
+> MPU enforcement is a key requirement for **ASIL-D freedom from interference** between
+> software components at different safety levels.
 
 ---
 
-# 32. Summary
+## 20 · Privilege Levels
 
-TriCore is far more than a traditional microcontroller CPU.
+TriCore enforces two privilege levels, controlled by the `PSW.IO` field:
 
-Key strengths include:
+```
+  ┌─────────────────────────────────────────────────────┐
+  │               TriCore Privilege Levels               │
+  │                                                      │
+  │  ┌──────────────────────────────────────────┐        │
+  │  │  Supervisor Mode (IO = 11b)              │        │
+  │  │                                          │        │
+  │  │  ✓ Full register access                  │        │
+  │  │  ✓ MTCR (write system registers)         │        │
+  │  │  ✓ Enable / disable interrupts globally  │        │
+  │  │  ✓ Access all peripheral SFRs            │        │
+  │  │  → Used by: OS kernel, safety manager    │        │
+  │  └──────────────────────────────────────────┘        │
+  │                        │                             │
+  │              SYSCALL / Trap                          │
+  │                        │                             │
+  │  ┌──────────────────────────────────────────┐        │
+  │  │  User Mode (IO = 00b / 01b)              │        │
+  │  │                                          │        │
+  │  │  ✗ Cannot modify system registers        │        │
+  │  │  ✗ Cannot disable interrupts globally    │        │
+  │  │  ✗ Cannot access protected SFRs          │        │
+  │  │  → Used by: Application tasks            │        │
+  │  └──────────────────────────────────────────┘        │
+  └─────────────────────────────────────────────────────┘
+```
 
-- RISC architecture
-- DSP acceleration
-- SIMD support
-- Floating point hardware
-- Multi-core processing
-- Functional safety
-- Security mechanisms
-- Automotive networking support
+---
 
-These capabilities make TriCore one of the most advanced automotive microcontroller architectures available today.
+## 21 · Interrupt System Overview
 
-In Part 3, we will dive into the most unique and important aspects of TriCore:
+TriCore's interrupt system is built for **low-latency, deterministic response** to
+hardware events.
 
-- Context Save Areas (CSA)
-- Hardware Context Switching
-- Interrupt Entry and Exit
-- Trap Handling
-- Context Chains
-- FCX, LCX, PCX, and PCXI Registers
-- Deterministic Interrupt Latency
-- Real-Time Execution Mechanisms
+```
+  Hardware Event
+  (CAN message received, ADC complete, timer expired)
+               │
+               ▼
+       Interrupt Controller (ICU)
+       evaluates priority vs current task
+               │
+         ┌─────┴──────┐
+         │            │
+     Lower prio    Higher prio
+         │            │
+     Ignored      CPU suspends current task
+    (for now)          │
+                       ▼
+               Context automatically saved
+               to CSA (Context Save Area)
+                       │
+                       ▼
+               ISR (service routine) executes
+                       │
+                       ▼
+               Context restored from CSA
+                       │
+                       ▼
+               Interrupted task resumes
+```
 
-These concepts are what truly differentiate TriCore from traditional ARM Cortex-M architectures.
+> ⚠️ The **Context Save Area (CSA)** mechanism — TriCore's unique approach to
+> hardware-managed register saving — will be covered in depth in **Part 3**.
+
+---
+
+## 22 · Trap System Overview
+
+Traps are the TriCore equivalent of hardware exceptions — they fire automatically when
+the CPU encounters an illegal or exceptional condition.
+
+### Trap Classes
+
+```
+  ┌───────┬─────────────────────────────────────────────────┐
+  │ Class │ Trigger Condition                               │
+  ├───────┼─────────────────────────────────────────────────┤
+  │  1    │ MMU / address translation fault                 │
+  │  2    │ Internal protection fault (MPU violation)       │
+  │  3    │ Instruction error (undefined opcode)            │
+  │  4    │ Context management error (CSA overflow)         │
+  │  5    │ Bus error (failed memory access)                │
+  │  6    │ Assertion trap (software-triggered)             │
+  │  7    │ SYSCALL (system call from user mode)            │
+  │  8    │ Non-maskable interrupt (NMI)                    │
+  └───────┴─────────────────────────────────────────────────┘
+```
+
+### Trap Flow
+
+```
+  Exception condition detected
+              │
+              ▼
+  CPU determines trap class and TIN (Trap Identification Number)
+              │
+              ▼
+  Context saved to CSA (same mechanism as interrupt)
+              │
+              ▼
+  Trap vector table entry executed
+              │
+              ▼
+  Safety handler / OS fault handler runs
+              │
+              ▼
+  Decision: recover, reset, or safe state
+```
+
+---
+
+## 23 · Multi-Core Processing
+
+TC3xx and TC4xx AURIX devices contain **up to 6 independent TriCore CPUs**, each capable
+of running its own program.
+
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                    AURIX TC39x                           │
+  │                                                          │
+  │  ┌────────┐  ┌────────┐  ┌────────┐                      │
+  │  │  CPU0  │  │  CPU1  │  │  CPU2  │                      │
+  │  │300 MHz │  │300 MHz │  │300 MHz │                      │
+  │  │ Safety │  │ Comms  │  │ Diag   │                      │
+  │  └────────┘  └────────┘  └────────┘                      │
+  │                                                          │
+  │  ┌────────┐  ┌────────┐  ┌────────┐                      │
+  │  │  CPU3  │  │  CPU4  │  │  CPU5  │                      │
+  │  │300 MHz │  │300 MHz │  │300 MHz │                      │
+  │  │ App    │  │ App    │  │Monitor │                      │
+  │  └────────┘  └────────┘  └────────┘                      │
+  │                                                          │
+  │  ┌──────────────────────────────────────────────────┐    │
+  │  │   LMU — Local Memory Unit (shared global RAM)    │    │
+  │  └──────────────────────────────────────────────────┘    │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### Typical Core Role Assignment
+
+| Core | Typical Role | Example Task |
+|---|---|---|
+| CPU0 | Safety-critical control | Motor torque, brake pressure |
+| CPU1 | Communication | CAN FD RX/TX, Ethernet |
+| CPU2 | Diagnostics & monitoring | Self-test, fault logging |
+| CPU3–5 | Application / ADAS | Sensor fusion, algorithms |
+
+---
+
+## 24 · Inter-Core Communication
+
+Cores are **isolated** — they cannot directly access each other's local memories. Safe
+data exchange uses **shared global memory** via the LMU.
+
+```
+  CPU0                      CPU1
+  ─────                     ─────
+  Write data to LMU   ──►  Read data from LMU
+
+  ┌──────────────┐          ┌──────────────────────────────┐
+  │ Shared       │          │ Synchronization Primitives   │
+  │ Mailbox in   │  + ───►  │                              │
+  │ LMU SRAM     │          │ LDMST  (atomic load+store)   │
+  └──────────────┘          │ SWAP   (atomic exchange)     │
+                            │ CMPSWAP(compare-and-swap)    │
+                            └──────────────────────────────┘
+```
+
+### Inter-Core Interrupt (IPI)
+
+```
+  CPU0 wants CPU1 to process new data:
+
+  CPU0 → writes to shared flag in LMU
+       → triggers SW interrupt on CPU1 via SRC register
+  CPU1 → interrupt fires → reads mailbox → processes data
+```
+
+---
+
+## 25 · Lockstep Safety
+
+Lockstep is TriCore's primary mechanism for **CPU-level fault detection** at ASIL-D.
+
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                   Lockstep Operation                     │
+  │                                                          │
+  │                   Program Code                           │
+  │                        │                                 │
+  │          ┌─────────────┴─────────────┐                   │
+  │          │                           │                   │
+  │   ┌──────▼──────┐             ┌──────▼──────┐            │
+  │   │   CPU0      │             │   CPU0 LS   │            │
+  │   │  (Master)   │             │  (Checker)  │            │
+  │   │             │             │  delayed    │            │
+  │   │ Executes    │             │ by N cycles │            │
+  │   └──────┬──────┘             └──────┬──────┘            │
+  │          │                           │                   │
+  │          └─────────────┬─────────────┘                   │
+  │                        │                                 │
+  │                 ┌──────▼──────┐                          │
+  │                 │  Comparator │                          │
+  │                 └──────┬──────┘                          │
+  │                        │                                 │
+  │              ┌──────────┴──────────┐                     │
+  │              │                     │                     │
+  │           MATCH                MISMATCH                  │
+  │              │                     │                     │
+  │      Continue normal           SMU Alarm                 │
+  │       execution                    │                     │
+  │                               Safe Reaction              │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### What Lockstep Detects
+
+```
+  ✓ Bit flips in ALU result registers (radiation, EMI)
+  ✓ Stuck-at faults in combinational logic
+  ✓ Timing violations causing wrong results
+  ✓ Systematic CPU microarchitecture faults
+```
+
+### What Lockstep Does NOT Replace
+
+Lockstep protects the **CPU computation**. Separate mechanisms handle:
+- Memory errors → ECC
+- Software hangs → Watchdog
+- Peripheral faults → SMU monitors
+- System timing → Clock monitors
+
+---
+
+## 26 · Functional Safety Features
+
+AURIX achieves **ASIL-D** capability through a layered set of hardware safety mechanisms:
+
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                 AURIX Safety Layers                      │
+  │                                                          │
+  │  ┌─────────────────────────────────────────────────┐     │
+  │  │  CPU Safety          Lockstep execution          │     │
+  │  └─────────────────────────────────────────────────┘     │
+  │  ┌─────────────────────────────────────────────────┐     │
+  │  │  Memory Safety       ECC (Flash, RAM, Cache)     │     │
+  │  └─────────────────────────────────────────────────┘     │
+  │  ┌─────────────────────────────────────────────────┐     │
+  │  │  Fault Collection    Safety Management Unit      │     │
+  │  └─────────────────────────────────────────────────┘     │
+  │  ┌─────────────────────────────────────────────────┐     │
+  │  │  Software Liveness   CPU + Safety Watchdogs      │     │
+  │  └─────────────────────────────────────────────────┘     │
+  │  ┌─────────────────────────────────────────────────┐     │
+  │  │  Register Protection ENDINIT lock mechanism      │     │
+  │  └─────────────────────────────────────────────────┘     │
+  │  ┌─────────────────────────────────────────────────┐     │
+  │  │  Memory Isolation    MPU (per CPU, configurable) │     │
+  │  └─────────────────────────────────────────────────┘     │
+  └──────────────────────────────────────────────────────────┘
+
+  Standard achieved:  ISO 26262  ·  Up to ASIL-D
+```
+
+---
+
+## 27 · Security Features
+
+Modern vehicles are internet-connected, making cybersecurity a hardware concern.
+AURIX integrates security features directly into silicon:
+
+```
+  ┌─────────────────────────────────────────────────────────┐
+  │               AURIX Security Features                   │
+  │                                                         │
+  │  Hardware Security Module (HSM)                         │
+  │  ├── Dedicated security CPU core (isolated)             │
+  │  ├── AES-128/256 hardware accelerator                   │
+  │  ├── RSA / ECC asymmetric crypto                        │
+  │  ├── Secure key storage (never readable in plaintext)   │
+  │  └── True Random Number Generator (TRNG)                │
+  │                                                         │
+  │  Secure Boot                                            │
+  │  ├── Cryptographic signature check on startup           │
+  │  └── Prevents unsigned firmware from running            │
+  │                                                         │
+  │  Debug Access Protection                                │
+  │  ├── JTAG password protection                           │
+  │  └── Production-locked devices resist debug access      │
+  └─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 28 · Watchdogs
+
+Watchdogs are hardware timers that **must be periodically refreshed** by software.
+If software hangs, the watchdog expires and triggers a recovery.
+
+```
+  ┌───────────────────────────────────────────────────────┐
+  │               AURIX Watchdog System                   │
+  │                                                       │
+  │  ┌──────────────────────────────────────────────┐     │
+  │  │  Safety Watchdog (WDT_S)                     │     │
+  │  │  → System-wide · Must be kicked by trusted   │     │
+  │  │    safety task · Timeout → system reset       │     │
+  │  └──────────────────────────────────────────────┘     │
+  │                                                       │
+  │  ┌──────────────────────────────────────────────┐     │
+  │  │  CPU Watchdog × N  (WDT_CPU0, CPU1 ...)      │     │
+  │  │  → One per core · Core-specific timeout      │     │
+  │  │  → Detects per-core hangs independently      │     │
+  │  └──────────────────────────────────────────────┘     │
+  └───────────────────────────────────────────────────────┘
+```
+
+### Windowed Watchdog Mode
+
+```
+  Standard mode:  kick anytime before timeout  →  OK
+  Windowed mode:  must kick ONLY within window  →  too early = FAULT
+                                                   too late  = FAULT
+
+  ──────────────────────────────────────────────────►  time
+       │          ╔══════════╗          │
+       │          ║  Valid   ║          │
+       │          ║  Window  ║          │
+   Timeout     Open        Close    Timeout
+   (too late)  window     window    (too early)
+```
+
+> The windowed mode prevents a **runaway loop** from accidentally refreshing the watchdog
+> at the wrong time, giving a stronger execution flow guarantee.
+
+---
+
+## 29 · Communication Capabilities
+
+AURIX devices provide one of the most extensive peripheral sets in any automotive MCU:
+
+```
+  ┌──────────────────────────────────────────────────────┐
+  │          AURIX Communication Peripherals             │
+  │                                                      │
+  │  ┌─────────────┐  Protocol    Applications           │
+  │  │  CAN FD     │  ISO 11898   Body, chassis, engine  │
+  │  │  (×4–8 ch)  │              ECU communication      │
+  │  └─────────────┘                                     │
+  │  ┌─────────────┐                                     │
+  │  │  Ethernet   │  100/1000BASE  ADAS, gateway,       │
+  │  │             │  -T1 (single  OTA update            │
+  │  └─────────────┘  pair)                              │
+  │  ┌─────────────┐                                     │
+  │  │  FlexRay    │  ISO 17458   Safety networks,       │
+  │  │             │              X-by-wire               │
+  │  └─────────────┘                                     │
+  │  ┌─────────────┐                                     │
+  │  │  LIN        │  ISO 17987   Seat, window, HVAC     │
+  │  └─────────────┘                                     │
+  │  ┌─────────────┐                                     │
+  │  │  SPI / QSPI │  —           Sensors, external NVM  │
+  │  └─────────────┘                                     │
+  │  ┌─────────────┐                                     │
+  │  │  I²C        │  —           Simple peripherals     │
+  │  └─────────────┘                                     │
+  │  ┌─────────────┐                                     │
+  │  │  UART/ASCLIN│  —           Debug, diagnostics     │
+  │  └─────────────┘                                     │
+  └──────────────────────────────────────────────────────┘
+```
+
+---
+
+## 30 · Automotive Advantages
+
+Why automotive OEMs and Tier-1 suppliers standardize on TriCore:
+
+```
+  ┌──────────────────────┬────────────────────────────────────┐
+  │  Advantage           │  Real-World Impact                 │
+  ├──────────────────────┼────────────────────────────────────┤
+  │  ASIL-D capable      │  Can be used in brake, steering,   │
+  │                      │  airbag — no external safety chip  │
+  ├──────────────────────┼────────────────────────────────────┤
+  │  Deterministic ISA   │  Worst-case timing provable for    │
+  │                      │  ISO 26262 timing analysis         │
+  ├──────────────────────┼────────────────────────────────────┤
+  │  Integrated DSP      │  No external DSP chip needed for   │
+  │                      │  motor control or radar            │
+  ├──────────────────────┼────────────────────────────────────┤
+  │  Multi-core scaling  │  Run safety + comms + app on one   │
+  │                      │  MCU, reducing ECU count           │
+  ├──────────────────────┼────────────────────────────────────┤
+  │  Hardware security   │  Meets UN R155 cybersecurity regs  │
+  │                      │  without external crypto chip      │
+  ├──────────────────────┼────────────────────────────────────┤
+  │  AUTOSAR native      │  Drop into existing automotive     │
+  │                      │  software stacks immediately       │
+  ├──────────────────────┼────────────────────────────────────┤
+  │  AEC-Q100 qualified  │  Guaranteed to survive automotive  │
+  │                      │  temperature, vibration, lifetime  │
+  └──────────────────────┴────────────────────────────────────┘
+```
+
+---
+
+## 31 · TriCore vs ARM Cortex-M
+
+A direct comparison for engineers with ARM background:
+
+| Feature | ARM Cortex-M7 | TriCore (TC3xx) |
+|---|---|---|
+| **Target market** | General embedded / IoT | Automotive safety systems |
+| **ISA type** | ARM Thumb-2 (16/32-bit) | TriCore (16/32-bit mixed) |
+| **Register file** | R0–R15 (unified) | D0–D15 + A0–A15 (separate) |
+| **DSP support** | Extensions (separate SIMD unit) | Native DSP engine, MADD |
+| **FPU** | Optional (Cortex-M4/M7) | Available on select variants |
+| **Max cores** | 1 (M7), 2 (M4+M7 on some) | Up to 6 independent CPUs |
+| **Lockstep** | Cortex-M33/R5 (optional) | Standard (AURIX-native) |
+| **Memory protection** | MPU (optional) | MPU (mandatory in ASIL) |
+| **Privilege levels** | Thread / Handler mode | User / Supervisor mode |
+| **Interrupt model** | NVIC (nested vectors) | ICU (priority + arbitration) |
+| **Context save** | Software pushes to stack | Hardware-managed CSA chain |
+| **Functional safety** | Up to ASIL-B typical | ASIL-D full capability |
+| **AUTOSAR usage** | Moderate | Extensive (industry standard) |
+| **CAN FD** | Some STM32/NXP | Extensive, multi-channel |
+| **Hardware security** | TrustZone (optional) | Dedicated HSM core |
+| **Toolchain** | GCC, Keil, IAR (well-known) | ADS, TASKING, HighTec, GHS |
+| **Learning curve** | Low–Medium | High |
+
+> **The key differentiator:** TriCore's **hardware-managed Context Save Area (CSA)**
+> replaces software-managed stack push/pop for interrupt handling — enabling deterministic,
+> faster context switches critical for real-time automotive control.
+
+---
+
+## 32 · Summary
+
+TriCore is a purpose-built automotive CPU architecture that can be described by the
+convergence of its five key capabilities:
+
+```
+         ┌────────────────────────────────────────────┐
+         │              TriCore CPU                   │
+         │                                            │
+         │   COMPUTE          MCU + DSP + RISC        │
+         │   ────────         Harvard arch            │
+         │                    Superscalar pipeline    │
+         │                    FPU, SIMD, MAC          │
+         │                                            │
+         │   SAFETY           Lockstep execution      │
+         │   ──────           ECC on all memory       │
+         │                    SMU fault management    │
+         │                    MPU isolation           │
+         │                                            │
+         │   REAL-TIME        Deterministic ISA       │
+         │   ─────────        Low-latency IRQ         │
+         │                    Hardware context save   │
+         │                    Branch prediction       │
+         │                                            │
+         │   SECURITY         HSM (hardware crypto)   │
+         │   ────────         Secure boot             │
+         │                    TRNG, key storage       │
+         │                                            │
+         │   CONNECTIVITY     CAN FD × 8             │
+         │   ────────────     Ethernet, FlexRay       │
+         │                    SPI, LIN, UART, I²C     │
+         └────────────────────────────────────────────┘
+```
+
+### What Comes Next in Part 3
+
+The deepest and most unique topic in TriCore internals:
+
+| Topic | Why It Matters |
+|---|---|
+| **Context Save Areas (CSA)** | TriCore's hardware-managed interrupt/call context — unlike any ARM design |
+| **Hardware Context Switching** | How registers are saved/restored without software intervention |
+| **Interrupt Entry & Exit** | Cycle-by-cycle detail of what happens when an IRQ fires |
+| **Trap Handling** | Hardware exception classification and software reaction |
+| **FCX / LCX / PCX / PCXI** | The four registers that manage the CSA linked list |
+| **Deterministic IRQ Latency** | How TriCore guarantees worst-case interrupt response |
+| **CSA Overflow / Underflow** | What happens when the CSA chain is exhausted |
+
+> These mechanisms are what truly separate TriCore from a fast ARM Cortex-M — and what
+> make it capable of meeting hard real-time guarantees in ISO 26262 ASIL-D systems.
+
+---
+
+*Infineon AURIX & TriCore Architecture Series — Part 2 of N*
+*Based on publicly available Infineon TriCore Architecture manuals and ISO 26262 principles.*
