@@ -1,39 +1,52 @@
 # AURIX TC3xx Boot Process & HSM Architecture
-## Complete Technical Reference — Infineon TriCore TC3xx Platform
+### Part 8 — Boot ROM, Boot Firmware, BMHD Validation, HSM & Multicore Release
 
----
-
-> **Document scope:** This reference covers the complete startup sequence of the Infineon AURIX TC3xx family from reset assertion through multicore application launch, including Boot ROM internals, Boot Firmware, Boot Mode Header (BMHD) structure and validation, all three boot modes, Hardware Security Module (HSM) integration, lockstep safety configuration, application startup software, and multicore release. Targeted at embedded systems engineers working with AURIX TC3xx derivatives (TC36x, TC37x, TC38x, TC39x).
+> Before a single line of application code runs, AURIX must answer a harder question
+> than "what do I execute?" — it must answer *"can I trust what I'm about to execute?"*
+> This is the complete journey from reset assertion through cryptographically validated
+> firmware, Hardware Security Module initialization, lockstep configuration, and
+> multicore release — the foundation every AURIX application silently depends on.
+>
+> **Document scope:** Covers the complete startup sequence of the Infineon AURIX TC3xx
+> family from reset assertion through multicore application launch, including Boot ROM
+> internals, Boot Firmware, Boot Mode Header (BMHD) structure and validation, all three
+> boot modes, Hardware Security Module (HSM) integration, lockstep safety configuration,
+> application startup software, and multicore release. Targeted at embedded systems
+> engineers working with AURIX TC3xx derivatives (TC36x, TC37x, TC38x, TC39x).
 
 ---
 
 ## Table of Contents
 
-1. [Architecture Overview](#1-architecture-overview)
-2. [TriCore CPU Subsystem](#2-tricore-cpu-subsystem)
-3. [Reset Sources and Types](#3-reset-sources-and-types)
-4. [Boot ROM (BROM)](#4-boot-rom-brom)
-5. [Boot Firmware](#5-boot-firmware)
-6. [CPU0 — The Boot Master](#6-cpu0--the-boot-master)
-7. [Boot Mode Selection](#7-boot-mode-selection)
-8. [Boot Mode Header (BMHD)](#8-boot-mode-header-bmhd)
-9. [BMHD Validation Process](#9-bmhd-validation-process)
-10. [Internal Flash Boot](#10-internal-flash-boot)
-11. [Alternate Boot Mode (ABM)](#11-alternate-boot-mode-abm)
-12. [Bootstrap Loader (BSL)](#12-bootstrap-loader-bsl)
-13. [Hardware Security Module (HSM)](#13-hardware-security-module-hsm)
-14. [Lockstep Configuration](#14-lockstep-configuration)
-15. [Safety Checks During Boot](#15-safety-checks-during-boot)
-16. [Application Startup Software](#16-application-startup-software)
-17. [Multicore Startup](#17-multicore-startup)
-18. [Watchdog Management During Boot](#18-watchdog-management-during-boot)
-19. [Non-Volatile Memory Layout](#19-non-volatile-memory-layout)
-20. [Complete Boot Sequence Diagram](#20-complete-boot-sequence-diagram)
-21. [Common Boot Failures and Debugging](#21-common-boot-failures-and-debugging)
-22. [AURIX Development Studio and Boot Debugging](#22-aurix-development-studio-and-boot-debugging)
-23. [Summary and Key Principles](#23-summary-and-key-principles)
-24. [Glossary](#24-glossary)
-25. [References](#25-references)
+| # | Topic |
+|---|---|
+| 1 | [Architecture Overview](#1--architecture-overview) |
+| 2 | [TriCore CPU Subsystem](#2--tricore-cpu-subsystem) |
+| 3 | [Reset Sources and Types](#3--reset-sources-and-types) |
+| 4 | [Boot ROM (BROM)](#4--boot-rom-brom) |
+| 5 | [Boot Firmware](#5--boot-firmware) |
+| 6 | [CPU0 — The Boot Master](#6--cpu0--the-boot-master) |
+| 7 | [Boot Mode Selection](#7--boot-mode-selection) |
+| 8 | [Boot Mode Header (BMHD)](#8--boot-mode-header-bmhd) |
+| 9 | [BMHD Validation Process](#9--bmhd-validation-process) |
+| 10 | [Internal Flash Boot](#10--internal-flash-boot) |
+| 11 | [Alternate Boot Mode (ABM)](#11--alternate-boot-mode-abm) |
+| 12 | [Bootstrap Loader (BSL)](#12--bootstrap-loader-bsl) |
+| 13 | [Hardware Security Module (HSM)](#13--hardware-security-module-hsm) |
+| 14 | [Lockstep Configuration](#14--lockstep-configuration) |
+| 15 | [Safety Checks During Boot](#15--safety-checks-during-boot) |
+| 16 | [Application Startup Software](#16--application-startup-software) |
+| 17 | [Multicore Startup](#17--multicore-startup) |
+| 18 | [Watchdog Management During Boot](#18--watchdog-management-during-boot) |
+| 19 | [Non-Volatile Memory Layout](#19--non-volatile-memory-layout) |
+| 20 | [Complete Boot Sequence Diagram](#20--complete-boot-sequence-diagram) |
+| 21 | [Common Boot Failures and Debugging](#21--common-boot-failures-and-debugging) |
+| 22 | [AURIX Development Studio and Boot Debugging](#22--aurix-development-studio-and-boot-debugging) |
+| 23 | [Summary and Key Principles](#23--summary-and-key-principles) |
+| 24 | [Glossary](#24--glossary) |
+| 25 | [References](#25--references) |
+
+---
 
 ---
 
