@@ -1,1299 +1,838 @@
 # AURIX TriCore Multi-Core Architecture
+### Part 6 — Core Structure, Shared Resources, Inter-Core Communication & Lockstep
 
+> A single CPU cannot simultaneously run hard real-time motor control, service CAN/Ethernet
+> traffic, run diagnostics, and stay isolated enough for safety certification. AURIX solves
+> this by integrating up to 6 independent TriCore CPUs on one die — each with private fast
+> memory, all connected through shared resources and a deterministic communication fabric.
+
+---
 
 ## Table of Contents
 
-- [1. Introduction](#1-introduction)
-- [2. Why AURIX Uses Multi-Core Architecture](#2-why-aurix-uses-multi-core-architecture)
-- [3. TriCore Multi-Core Overview](#3-tricore-multi-core-overview)
-- [4. AURIX Core Structure](#4-aurix-core-structure)
-- [5. CPU Local Resources](#5-cpu-local-resources)
-  - [5.1 Registers](#51-registers)
-  - [5.2 CSA](#52-csa)
-  - [5.3 PSPR](#53-pspr)
-  - [5.4 DSPR](#54-dspr)
-  - [5.5 Local Cache](#55-local-cache)
-- [6. Shared System Resources](#6-shared-system-resources)
-  - [6.1 LMU](#61-lmu)
-  - [6.2 Flash Memory](#62-flash-memory)
-  - [6.3 Peripherals](#63-peripherals)
-- [7. System Resource Interconnect (SRI)](#7-system-resource-interconnect-sri)
-- [8. Master Core and Slave Cores](#8-master-core-and-slave-cores)
-- [9. Multi-Core Startup Sequence](#9-multi-core-startup-sequence)
-- [10. Inter-Core Communication](#10-inter-core-communication)
-- [11. Shared Memory Communication](#11-shared-memory-communication)
-- [12. Synchronization Between Cores](#12-synchronization-between-cores)
-- [13. Spinlocks](#13-spinlocks)
-- [14. Interrupt-Based Communication](#14-interrupt-based-communication)
-- [15. DMA Communication](#15-dma-communication)
-- [16. Multi-Core Task Distribution Example](#16-multi-core-task-distribution-example)
-- [17. Lockstep Architecture](#17-lockstep-architecture)
-- [18. Automotive Example](#18-automotive-example)
-- [19. Summary](#19-summary)
-
+| # | Topic |
+|---|---|
+| 1 | [Introduction](#1--introduction) |
+| 2 | [Why AURIX Uses Multi-Core Architecture](#2--why-aurix-uses-multi-core-architecture) |
+| 3 | [TriCore Multi-Core Overview](#3--tricore-multi-core-overview) |
+| 4 | [AURIX Core Structure](#4--aurix-core-structure) |
+| 5 | [CPU Local Resources](#5--cpu-local-resources) |
+| 6 | [Shared System Resources](#6--shared-system-resources) |
+| 7 | [System Resource Interconnect (SRI)](#7--system-resource-interconnect-sri) |
+| 8 | [Master Core and Slave Cores](#8--master-core-and-slave-cores) |
+| 9 | [Multi-Core Startup Sequence](#9--multi-core-startup-sequence) |
+| 10 | [Inter-Core Communication Methods](#10--inter-core-communication-methods) |
+| 11 | [Shared Memory Communication](#11--shared-memory-communication) |
+| 12 | [Synchronization Between Cores](#12--synchronization-between-cores) |
+| 13 | [Spinlocks](#13--spinlocks) |
+| 14 | [Interrupt-Based Communication](#14--interrupt-based-communication) |
+| 15 | [DMA Communication](#15--dma-communication) |
+| 16 | [Multi-Core Task Distribution Example](#16--multi-core-task-distribution-example) |
+| 17 | [Lockstep Architecture](#17--lockstep-architecture) |
+| 18 | [Automotive Example — Vehicle Controller](#18--automotive-example--vehicle-controller) |
+| 19 | [Summary](#19--summary) |
 
 ---
 
-## 1. Introduction
+## 1 · Introduction
 
-Modern automotive systems require large processing capability.
-
-Examples:
-
-- Engine control
-- Electric motor control
-- ADAS systems
-- Radar processing
-- Communication gateways
-- Diagnostics
-- OTA updates
-
-
-A single processor has limitations:
-
-- Limited processing power
-- Difficult real-time scheduling
-- High interrupt load
-
-
-AURIX solves this by integrating multiple TriCore processors inside one MCU.
-
-
-Example:
-
-```text
-                 AURIX MCU
-
-
-        +--------------------+
-
-        |        CPU0        |
-
-        |        CPU1        |
-
-        |        CPU2        |
-
-        |        CPU3        |
-
-        +--------------------+
+Modern vehicles run dozens of concurrent real-time workloads on a single ECU:
 
 ```
+  ┌──────────────────────────────────────────────────────────┐
+  │              Concurrent Automotive Workloads              │
+  │                                                            │
+  │  ⚡ Motor control (FOC)        — 10–100 µs loop deadline   │
+  │  🚗 Engine control             — cylinder-synchronous timing│
+  │  👁️  ADAS / radar processing    — high data throughput      │
+  │  🌐 Communication gateway      — CAN FD, Ethernet routing  │
+  │  🔍 Diagnostics & logging      — background, lower priority│
+  │  📡 OTA update management      — large data transfers      │
+  └──────────────────────────────────────────────────────────┘
+```
 
+### The Single-Core Bottleneck
 
-Each CPU can execute different software tasks independently.
+```
+  ┌──────────────────────────┐
+  │          CPU0            │
+  │                          │
+  │  Motor Control  ─┐       │
+  │  CAN Handling    ├─ All  │   Problems:
+  │  Diagnostics     ├─ on   │   ✗ Limited processing headroom
+  │  Communication  ─┘ one   │   ✗ Hard real-time scheduling
+  │                   core   │   ✗ High interrupt load on 1 CPU
+  └──────────────────────────┘   ✗ No safety isolation between tasks
+```
 
+### The AURIX Multi-Core Solution
+
+```
+  ┌─────────────────────────────────────────────────────────┐
+  │                      AURIX MCU                          │
+  │                                                          │
+  │  ┌────────┐   ┌────────┐   ┌────────┐   ┌────────┐      │
+  │  │  CPU0  │   │  CPU1  │   │  CPU2  │   │  CPU3  │      │
+  │  └────────┘   └────────┘   └────────┘   └────────┘      │
+  │                                                          │
+  │  Each CPU executes independent software, in parallel,    │
+  │  with its own private fast memory                        │
+  └─────────────────────────────────────────────────────────┘
+```
 
 ---
 
-# 2. Why AURIX Uses Multi-Core Architecture
+## 2 · Why AURIX Uses Multi-Core Architecture
 
-
-## Performance Improvement
-
-
-Instead of running everything on one CPU:
-
-
-```text
-CPU0
-
- |
- |
- +--> Motor Control
-
- +--> CAN
-
- +--> Diagnostics
-
- +--> Communication
+### Reason 1 — Performance Improvement
 
 ```
+  Single-core (everything serialized):
+  ──────────────────────────────────────
+  CPU0
+   │
+   ├──► Motor Control     ┐
+   ├──► CAN                │  All competing for the
+   ├──► Diagnostics        │  same CPU time slice
+   └──► Communication     ┘
 
+  Multi-core (parallel execution):
+  ──────────────────────────────────────
+  CPU0 ──► Motor Control      (dedicated, full bandwidth)
+  CPU1 ──► Communication      (dedicated, full bandwidth)
+  CPU2 ──► Diagnostics        (dedicated, full bandwidth)
 
-Tasks are distributed:
-
-
-```text
-CPU0
-
- |
- +--> Motor Control
-
-
-
-CPU1
-
- |
- +--> Communication
-
-
-
-CPU2
-
- |
- +--> Diagnostics
-
+  Result: 3× the effective processing capacity for the same clock speed
 ```
 
+### Reason 2 — Real-Time Determinism
 
-This improves performance.
+```
+  Requirement:  Motor Control ISR must execute every 100 µs — always.
 
+  On a single core sharing with CAN/Ethernet/diagnostics:
+  ──────────────────────────────────────────────────────────
+  Motor ISR deadline at risk if a long CAN burst or diagnostic
+  routine is mid-execution when the 100 µs window arrives.
+
+  On dedicated CPU0 for motor control:
+  ──────────────────────────────────────────────────────────
+  Motor ISR deadline is isolated from CAN/Ethernet/diagnostic
+  load entirely — those run on CPU1/CPU2 and cannot delay it.
+```
+
+### Reason 3 — Safety Isolation
+
+```
+  ┌───────────────────┐         ┌───────────────────┐
+  │       CPU0        │         │       CPU1        │
+  │  Safety Control   │         │  Communication    │
+  │  (ASIL-D)         │         │  (QM / ASIL-B)    │
+  └───────────────────┘         └───────────────────┘
+
+  A bug or crash in CPU1's communication stack
+  CANNOT corrupt or stall CPU0's safety control loop.
+
+  This is "freedom from interference" — a core ISO 26262 requirement.
+```
 
 ---
 
-## Real-Time Determinism
-
-
-Automotive systems require predictable timing.
-
-
-Example:
-
-
-```text
-Motor Control ISR
-
-Must execute every:
-
-100 us
+## 3 · TriCore Multi-Core Overview
 
 ```
-
-
-At the same time:
-
-
-```text
-CAN Messages
-
-Ethernet
-
-Diagnostics
-
+  ┌────────────────────────────────────────────────────────────────┐
+  │                  AURIX TC3xx Multi-Core Layout                 │
+  │                                                                │
+  │                            SRI Bus                             │
+  │                               │                                │
+  │     ┌─────────────────────────┼─────────────────────────┐      │
+  │     │                         │                         │      │
+  │  ┌──▼───┐                 ┌──▼───┐                 ┌──▼───┐   │
+  │  │ CPU0 │                 │ CPU1 │                 │ CPU2 │   │
+  │  └──┬───┘                 └──┬───┘                 └──┬───┘   │
+  │     │                         │                         │      │
+  │  ┌──▼───┐                 ┌──▼───┐                 ┌──▼───┐   │
+  │  │PSPR0 │                 │PSPR1 │                 │PSPR2 │   │
+  │  │DSPR0 │                 │DSPR1 │                 │DSPR2 │   │
+  │  │Cache0│                 │Cache1│                 │Cache2│   │
+  │  └──────┘                 └──────┘                 └──────┘   │
+  │                                                                │
+  │                               │                                │
+  │                          ┌────▼────┐                           │
+  │                          │   LMU   │  ← Shared across all cores│
+  │                          └─────────┘                           │
+  └────────────────────────────────────────────────────────────────┘
 ```
 
-
-are running.
-
-
-Using multiple cores separates these workloads.
-
+Each CPU is a **complete, independent TriCore processor** — not a simplified co-processor.
+All cores can run full applications, handle interrupts, and execute the full TriCore ISA.
 
 ---
 
-## Safety Isolation
+## 4 · AURIX Core Structure
 
-
-Critical software can be separated.
-
-
-Example:
-
-
-```text
-CPU0
-
-Safety Control
-
-
-
-CPU1
-
-Communication
+Every TriCore CPU in an AURIX device has an identical internal structure:
 
 ```
+  ┌──────────────────────────────────────────────────┐
+  │                      CPU0                         │
+  │                                                   │
+  │   ┌─────────────────────────────────────────┐    │
+  │   │  Registers  (D0–D15, A0–A15)            │    │
+  │   ├─────────────────────────────────────────┤    │
+  │   │  CSA Pool   (Context Save Areas)        │    │
+  │   ├─────────────────────────────────────────┤    │
+  │   │  I-Cache    (Instruction cache)         │    │
+  │   ├─────────────────────────────────────────┤    │
+  │   │  D-Cache    (Data cache)                │    │
+  │   ├─────────────────────────────────────────┤    │
+  │   │  PSPR0      (Local program RAM)         │    │
+  │   ├─────────────────────────────────────────┤    │
+  │   │  DSPR0      (Local data RAM)            │    │
+  │   └─────────────────────────────────────────┘    │
+  └──────────────────────────────────────────────────┘
 
+  CPU1, CPU2, CPU3... — identical structure, independent instances
+```
 
-A failure in communication software is isolated from safety functions.
-
+> Every CPU is a "complete computer" in miniature — registers, context management,
+> cache, and local memory — connected to the rest of the chip only through the SRI bus.
 
 ---
 
-# 3. TriCore Multi-Core Overview
+## 5 · CPU Local Resources
 
+Resources owned **exclusively** by one CPU — not directly accessible at full speed
+by any other core.
 
-AURIX TC3xx devices contain:
-
-- Multiple TriCore CPUs
-- Private local memories
-- Shared memories
-- Shared peripherals
-- Communication buses
-
-
-High-level architecture:
-
-
-```text
-
-                         SRI
-
-
-                          |
-
- ------------------------------------------------
-
-
-       |                 |                 |
-
-
-     CPU0              CPU1              CPU2
-
-
-       |                 |                 |
-
-
-     PSPR0             PSPR1             PSPR2
-
-
-     DSPR0             DSPR1             DSPR2
-
-
-    Cache0            Cache1            Cache2
-
-
-
-                          |
-
-
-                         LMU
-
+### 5.1 · Registers
 
 ```
+  Fastest storage tier — zero-cycle access within the pipeline
 
+  Used for:
+  ✓ Arithmetic and logic operations
+  ✓ Address calculation
+  ✓ Holding current CPU execution state
+```
+
+### 5.2 · CSA (Context Save Area)
+
+```
+  Each core owns its own independent CSA pool:
+
+  CPU0 ──► CSA Pool 0   (in DSPR0)
+  CPU1 ──► CSA Pool 1   (in DSPR1)
+  CPU2 ──► CSA Pool 2   (in DSPR2)
+
+  Used for:
+  ✓ Function call context (Upper Context)
+  ✓ Interrupt context (Lower Context)
+  ✓ Hardware-managed task switching
+
+  See Part 3 for the complete CSA mechanism.
+```
+
+### 5.3 · PSPR (Program Scratch-Pad RAM)
+
+```
+  CPU0
+   │
+   ▼
+  PSPR0  ──►  BrakeControlISR()   ← copied here for guaranteed timing
+
+  Advantages:
+  ✓ ~1–2 cycle instruction fetch (vs 5–10 from Flash)
+  ✓ Zero cache-miss possibility
+  ✓ Fully deterministic — provable WCET for ISO 26262
+```
+
+### 5.4 · DSPR (Data Scratch-Pad RAM)
+
+```
+  CPU0
+   │
+   ▼
+  DSPR0  ──►  motorSpeed, taskStacks, CSA pool
+
+  Advantages:
+  ✓ ~1–2 cycle data access
+  ✓ No SRI bus contention
+  ✓ Predictable timing for real-time variables
+```
+
+### 5.5 · Local Cache
+
+```
+  CPU0 ──► Cache0
+  CPU1 ──► Cache1
+  CPU2 ──► Cache2
+
+  Accelerates access to:
+  • PFlash (via I-Cache)
+  • LMU / shared data (via D-Cache)
+
+  ⚠️ Not deterministic like PSPR/DSPR — hit/miss depends on
+     prior access history, useful for general code, not WCET-critical paths
+```
+
+> Full detail on PSPR, DSPR, Cache, and ECC is covered in **Part 5 — Memory Architecture**.
 
 ---
 
-# 4. AURIX Core Structure
+## 6 · Shared System Resources
 
+Resources accessible by **every** CPU core, through the shared bus fabric.
 
-Each TriCore CPU has private resources.
-
-
-Example CPU0:
-
-
-```text
-
-             CPU0
-
-
- +------------------------+
-
- | Registers              |
-
- | CSA                    |
-
- | Instruction Cache      |
-
- | Data Cache             |
-
- | PSPR0                  |
-
- | DSPR0                  |
-
- +------------------------+
-
+### 6.1 · LMU (Local Memory Unit)
 
 ```
+  CPU0 ──┐
+         │
+  CPU1 ──┼──►  LMU  (shared RAM)
+         │
+  CPU2 ──┘
 
+  Used for:
+  ✓ Inter-core communication
+  ✓ Shared buffers (e.g., CAN RX queues consumed by multiple cores)
+  ✓ Global application/vehicle state
+```
 
-CPU1 and CPU2 have the same structure.
+### 6.2 · Flash Memory
 
+```
+  ┌─────────────────────────────────────────┐
+  │  PFlash  ──►  Program code (all cores)  │
+  │  DFlash  ──►  Calibration / persistent  │
+  │               data (all cores)          │
+  └─────────────────────────────────────────┘
+
+  Every CPU can fetch and execute code from the same PFlash image —
+  typically each core runs from its own dedicated address range/partition.
+```
+
+### 6.3 · Peripherals
+
+```
+  Shared peripheral set, reachable by all cores via SPB:
+
+  CAN · CAN FD · SPI · ADC (VADC) · UART (ASCLIN) · Ethernet · LIN · GTM
+
+  Access is arbitrated, and SRN routing (TOS field, see Part 4)
+  determines which specific CPU services each peripheral event.
+```
 
 ---
 
-# 5. CPU Local Resources
+## 7 · System Resource Interconnect (SRI)
 
+The **SRI** is the high-speed crossbar that connects every CPU, memory, DMA controller,
+and peripheral bridge.
 
-Each core owns resources that are not directly shared.
+```
+  ┌───────────────────────────────────────────────────────────┐
+  │                       SRI Bus (Crossbar)                  │
+  │                                                            │
+  │   CPU0  ───┐                                               │
+  │   CPU1  ───┤                                               │
+  │   CPU2  ───┼──────────►  Memory (PFlash, DFlash, LMU)     │
+  │   DMA   ───┤                                               │
+  │ Peripheral─┘                                               │
+  │                                                            │
+  │   Multiple non-conflicting master↔slave pairs              │
+  │   can transfer simultaneously (true crossbar behavior)     │
+  └───────────────────────────────────────────────────────────┘
+```
 
-
-## 5.1 Registers
-
-
-Registers are the fastest storage.
-
-
-Used for:
-
-
-- Arithmetic operations
-- Address calculations
-- CPU state
-
+> Full bus architecture detail (SRI vs SPB, arbitration) is covered in **Part 5**.
 
 ---
 
-## 5.2 CSA
+## 8 · Master Core and Slave Cores
 
-
-CSA:
-
-```
-Context Save Area
-```
-
-
-Used for:
-
-
-- Function calls
-- Interrupt context saving
-- Task switching
-
-
-Each core has its own CSA area.
-
-
-Example:
-
-
-```text
-
-CPU0
-
- |
-
-CSA0
-
-
-CPU1
-
- |
-
-CSA1
-
+After a system reset, **one core boots first** and is responsible for initializing the
+chip before releasing the other cores.
 
 ```
-
+  ┌────────────────────────────────────────────────────────┐
+  │                 Master / Slave Core Roles               │
+  │                                                          │
+  │  CPU0  (Master Core)                                    │
+  │  ───────────────────                                    │
+  │  ✓ Executes first after reset                           │
+  │  ✓ Performs hardware initialization                      │
+  │  ✓ Configures clocks and PLLs                            │
+  │  ✓ Initializes shared memory (LMU, Flash wait states)    │
+  │  ✓ Releases CPU1, CPU2, CPU3... to start running         │
+  │                                                          │
+  │  CPU1 / CPU2 / CPU3...  (Slave Cores)                    │
+  │  ─────────────────────────────────                       │
+  │  ✓ Held in reset/halt until released by CPU0             │
+  │  ✓ Begin executing only after master signals "go"        │
+  │  ✓ Run their own independent application code afterward  │
+  └────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 5.3 PSPR
-
-
-PSPR:
+## 9 · Multi-Core Startup Sequence
 
 ```
-Program Scratch Pad RAM
+  ┌──────────────────────────────────────────────────────┐
+  │                       Reset                          │
+  └────────────────────────┬───────────────────────────┘
+                           │
+  ┌────────────────────────▼───────────────────────────┐
+  │                  CPU0 Starts                        │
+  │  (CPU1/2/3 held in reset by hardware)                │
+  └────────────────────────┬───────────────────────────┘
+                           │
+  ┌────────────────────────▼───────────────────────────┐
+  │              Initialize System (CPU0)                │
+  │  • Clock / PLL setup                                 │
+  │  • Watchdog configuration                             │
+  │  • Memory wait-state setup                            │
+  │  • Safety endinit unlock sequence                     │
+  └────────────────────────┬───────────────────────────┘
+                           │
+  ┌────────────────────────▼───────────────────────────┐
+  │                  Release CPU1                        │
+  │  CPU0 writes to CPU1's start register                │
+  │  CPU1 begins executing its own startup code           │
+  └────────────────────────┬───────────────────────────┘
+                           │
+  ┌────────────────────────▼───────────────────────────┐
+  │                  Release CPU2                        │
+  │  Same mechanism — CPU0 releases CPU2                 │
+  └────────────────────────┬───────────────────────────┘
+                           │
+  ┌────────────────────────▼───────────────────────────┐
+  │       All cores now running independently            │
+  └──────────────────────────────────────────────────────┘
 ```
 
-
-Local program memory.
-
-
-Used for:
-
-
-- Critical ISRs
-- Time-sensitive algorithms
-- Safety functions
-
-
-Example:
-
-
-```text
-
-CPU0
-
-
- |
-
- v
-
-
-PSPR0
-
-
- |
-
-Brake Control ISR
-
-
-```
-
-
-Advantages:
-
-
-- Very fast
-- No cache miss
-- Deterministic execution
-
+> This staged startup ensures system-wide resources (clocks, Flash timing, safety
+> registers) are configured exactly once, by a single trusted core, before any other
+> core begins touching shared hardware.
 
 ---
 
-## 5.4 DSPR
-
-
-DSPR:
+## 10 · Inter-Core Communication Methods
 
 ```
-Data Scratch Pad RAM
+  ┌─────────────────────────────────────────────────────────────┐
+  │              Inter-Core Communication Toolbox                │
+  │                                                                │
+  │  ┌───────────────┐  ┌───────────────┐  ┌───────────────┐    │
+  │  │ Shared Memory │  │  Interrupts   │  │  Spinlocks    │    │
+  │  │   (via LMU)   │  │ (SW-triggered)│  │ (mutual excl.)│    │
+  │  └───────────────┘  └───────────────┘  └───────────────┘    │
+  │                                                                │
+  │  ┌───────────────┐                                            │
+  │  │      DMA      │                                            │
+  │  │ (CPU-free move│                                            │
+  │  │   of data)    │                                            │
+  │  └───────────────┘                                            │
+  └─────────────────────────────────────────────────────────────┘
 ```
 
-
-Local data memory.
-
-
-Stores:
-
-
-- Variables
-- Stack
-- Buffers
-- RTOS objects
-
-
-Example:
-
-
-```text
-
-CPU0
-
-
- |
-
- v
-
-
-DSPR0
-
-
- |
-
-Motor Speed Variable
-
-
-```
-
-
-Advantages:
-
-
-- Low latency
-- No bus contention
-- Predictable timing
-
+| Method | Best For | Latency |
+|---|---|---|
+| Shared memory (LMU) | Passive data sharing (state, config) | Low, but needs sync |
+| Software interrupt | Event notification ("data ready") | Very low, immediate |
+| Spinlock | Mutual exclusion on a shared resource | Low if uncontended |
+| DMA | Bulk data transfer with zero CPU load | Depends on size, async |
 
 ---
 
-## 5.5 Local Cache
+## 11 · Shared Memory Communication
 
-
-Each core has its own cache.
-
-
-Example:
-
-
-```text
-
-CPU0 --> Cache0
-
-
-CPU1 --> Cache1
-
-
-CPU2 --> Cache2
-
+The simplest inter-core communication pattern: one core writes to LMU, another reads.
 
 ```
+  CPU0 (Motor Control)                    CPU1 (CAN Gateway)
+  ──────────────────────                  ──────────────────────
 
+  Computes vehicle speed
+         │
+         ▼
+  Write to LMU:
+  LMU[vehicleSpeed] = 95 km/h
+         │
+         ▼
+  ┌──────────────────┐
+  │       LMU         │
+  │  vehicleSpeed=95  │
+  └──────────────────┘
+         │
+         ▼
+                                          Read from LMU:
+                                          speed = LMU[vehicleSpeed]
+                                                 │
+                                                 ▼
+                                          Transmit over CAN FD
+```
 
-Cache improves performance when accessing:
+```
+  Flow Summary:
+  ──────────────────────────────────────────────────
+  CPU0 → Write Data → LMU → CPU1 → Read Data
+```
 
-
-- Flash
-- Shared memory
-
-
-but it is not deterministic like PSPR/DSPR.
-
+> ⚠️ Remember the **cache coherency hazard** from Part 5 — if CPU1's D-Cache holds a
+> stale copy of this address, it may read an old value unless the region is
+> non-cacheable or explicitly invalidated.
 
 ---
 
-# 6. Shared System Resources
+## 12 · Synchronization Between Cores
 
-
-Resources accessible by all cores.
-
-
-## 6.1 LMU
-
-
-LMU:
+When multiple cores access the **same shared resource concurrently**, a race condition
+can occur.
 
 ```
-Local Memory Unit
+  Unsynchronized access — race condition:
+
+  Shared variable:  counter = 10
+
+  CPU0:                          CPU1:
+  ──────                         ──────
+  read counter (10)
+                                 read counter (10)
+  counter = 10 + 1 = 11
+                                 counter = 10 + 1 = 11
+  write counter = 11
+                                 write counter = 11
+
+  Expected result: counter = 12  (two increments)
+  Actual result:   counter = 11  ← LOST UPDATE
 ```
 
-
-Shared RAM.
-
-
-Example:
-
-
-```text
-
-
-CPU0
-   \
-    \
-     LMU
-    /
-   /
-CPU1
-
+### Solutions
 
 ```
-
-
-Used for:
-
-
-- Inter-core communication
-- Shared buffers
-- Global data
-
+  ┌──────────────────────────────────────────────────────────┐
+  │  Mechanism            │  How It Prevents the Race          │
+  ├──────────────────────────────────────────────────────────┤
+  │  Spinlock             │  One core holds exclusive access   │
+  │                       │  while others wait (poll)          │
+  ├──────────────────────────────────────────────────────────┤
+  │  Mutex (OS-level)     │  Like spinlock, but waiting core   │
+  │                       │  yields instead of busy-polling    │
+  ├──────────────────────────────────────────────────────────┤
+  │  Atomic operations    │  LDMST, SWAP, CMPSWAP — hardware   │
+  │  (TriCore native)     │  guarantees read-modify-write as   │
+  │                       │  one indivisible operation         │
+  └──────────────────────────────────────────────────────────┘
+```
 
 ---
 
-## 6.2 Flash Memory
+## 13 · Spinlocks
 
-
-All cores can access:
-
-
-```text
-PFlash
-
-DFlash
+A spinlock grants **exclusive access** to a shared resource — one core proceeds while
+others actively wait ("spin") until the lock is released.
 
 ```
+  ┌──────────────────────────────────────────────────────────┐
+  │                    Spinlock Operation                     │
+  │                                                            │
+  │  CPU0                              CPU1                  │
+  │  ─────                             ─────                  │
+  │  Acquire Lock                      Try Acquire Lock        │
+  │       │                                  │                │
+  │       ▼                                  ▼                │
+  │  Lock = 1 (success)               Lock already 1           │
+  │       │                            → WAIT (spin)           │
+  │       ▼                                  │                │
+  │  Access Shared Resource                  │  (still spinning)│
+  │       │                                  │                │
+  │       ▼                                  │                │
+  │  Release Lock (Lock = 0)                 │                │
+  │       │                                  ▼                │
+  │       │                            Lock = 0 → Acquire!     │
+  │       │                                  │                │
+  │       │                                  ▼                │
+  │       │                            Access Shared Resource  │
+  └──────────────────────────────────────────────────────────┘
+```
 
+### TriCore Atomic Instruction Used for Spinlocks
 
-PFlash:
+```c
+/* CMPSWAP: atomic compare-and-swap, single indivisible instruction */
+uint32_t expected = 0;   /* lock free */
+uint32_t desired   = 1;  /* lock taken */
 
-- Program code
+if (atomic_compare_swap(&lock, expected, desired)) {
+    /* Lock acquired — critical section */
+    sharedCounter++;
+    lock = 0;  /* release */
+} else {
+    /* Lock was already held — spin and retry */
+}
+```
 
-
-DFlash:
-
-- Calibration
-- Persistent data
-
+> Spinlocks are appropriate only for **very short critical sections** — since the
+> waiting core burns CPU cycles polling instead of doing useful work.
 
 ---
 
-## 6.3 Peripherals
+## 14 · Interrupt-Based Communication
 
+One core can directly **notify** another core of an event using a software-triggered
+interrupt (covered in detail in Part 4).
 
-Examples:
+```
+  CPU0                                CPU1
+  ─────                               ─────
+  Data ready in shared buffer
+        │
+        ▼
+  Write to GPSR SRN (TOS=CPU1, SETR=1)
+        │
+        ▼
+  Interrupt fires on CPU1
+                                       │
+                                       ▼
+                                 CPU1 ISR executes:
+                                 "Process new data"
+```
 
+### Common Uses
 
-- CAN
-- SPI
-- ADC
-- UART
-- Ethernet
-
-
-Connected through the bus system.
-
+```
+  ✓ "Data ready" notifications (CPU0 finished computing, CPU1 should act)
+  ✓ Command dispatch ("CPU2: start diagnostic self-test now")
+  ✓ Synchronization barriers between cores at startup
+  ✓ Emergency notification ("CPU0: SMU alarm fired, enter safe state")
+```
 
 ---
 
-# 7. System Resource Interconnect (SRI)
+## 15 · DMA Communication
 
-
-SRI:
-
-```
-System Resource Interconnect
-```
-
-
-It connects:
-
-
-- CPUs
-- Memory
-- DMA
-- Peripherals
-
-
-Diagram:
-
-
-```text
-
-
-              SRI BUS
-
-
-CPU0 --------|
-
-CPU1 --------|
-
-CPU2 --------|-------- Memory
-
-DMA ---------|
-
-Peripheral --|
-
-
+For larger data transfers, routing through DMA avoids consuming **any** CPU cycles
+on either side.
 
 ```
+  Without DMA (CPU-mediated transfer):
+  ────────────────────────────────────────────────────
+  CPU0 reads from its buffer
+       │
+       ▼
+  CPU0 writes to LMU
+       │
+       ▼
+  CPU1 reads from LMU
+       │
+       ▼
+  CPU1 writes to its own buffer
+
+  Cost: CPU0 AND CPU1 cycles consumed
 
 
-SRI handles communication between system components.
+  With DMA:
+  ────────────────────────────────────────────────────
+  CPU0
+   │
+   ▼
+  Data Buffer (CPU0's DSPR)
+   │
+   ▼
+  DMA Controller  ──────►  CPU1's Memory (DSPR1 or LMU)
+   │
+   ▼
+  (Neither CPU0 nor CPU1 spends cycles on the copy)
 
+  Cost: Zero CPU cycles — DMA does the work in the background
+```
+
+### Benefits
+
+```
+  ✓ Faster transfer for large data blocks
+  ✓ Both source and destination CPUs free to do other work
+  ✓ Optional completion interrupt notifies the receiving CPU when done
+```
 
 ---
 
-# 8. Master Core and Slave Cores
+## 16 · Multi-Core Task Distribution Example
 
-
-After reset, one core starts first.
-
-
-Usually:
-
-
-```text
-CPU0
-
-Master Core
+A realistic 3-core automotive ECU partitioning:
 
 ```
-
-
-Responsibilities:
-
-
-- Hardware initialization
-- Clock setup
-- Memory setup
-- Start other cores
-
-
-Other cores:
-
-
-```text
-CPU1
-
-CPU2
-
-CPU3
-
+  ┌──────────────────────────────────────────────────────────┐
+  │                       AURIX ECU                          │
+  │                                                            │
+  │  CPU0                                                     │
+  │   ├──► Motor Control          (hard real-time, ASIL-D)    │
+  │   └──► Safety Functions       (lockstep-protected)        │
+  │                                                            │
+  │  CPU1                                                     │
+  │   ├──► CAN FD Communication   (vehicle network)            │
+  │   └──► Ethernet               (gateway / diagnostics link) │
+  │                                                            │
+  │  CPU2                                                     │
+  │   ├──► Diagnostics            (UDS services)               │
+  │   └──► Logging                (event/fault recording)      │
+  └──────────────────────────────────────────────────────────┘
 ```
 
+Each core's workload is chosen so that:
 
-are started later.
-
+| Core | Priority Class | Why Isolated |
+|---|---|---|
+| CPU0 | Hard real-time, safety-critical | Must never be delayed by comms or logging |
+| CPU1 | Soft real-time, networking | Bursty traffic shouldn't disturb motor control |
+| CPU2 | Best-effort, background | Diagnostics/logging are lowest urgency |
 
 ---
 
-# 9. Multi-Core Startup Sequence
+## 17 · Lockstep Architecture
 
-
-Sequence:
-
-
-```text
-
-Reset
-
-
- |
-
- v
-
-
-CPU0 Starts
-
-
- |
-
- v
-
-
-Initialize System
-
-
- |
-
- v
-
-
-Release CPU1
-
-
- |
-
- v
-
-
-Release CPU2
-
-
+Select AURIX cores support **lockstep** — running the same program on two physical
+execution units simultaneously and comparing results every cycle, to detect random
+hardware faults.
 
 ```
+  ┌──────────────────────────────────────────────────────────┐
+  │                   Lockstep Core Pair                     │
+  │                                                            │
+  │                       Program Code                        │
+  │                            │                               │
+  │            ┌───────────────┴───────────────┐               │
+  │            │                               │               │
+  │      ┌─────▼─────┐                  ┌─────▼─────┐         │
+  │      │   CPU0    │                  │  CPU0-LS  │         │
+  │      │ (Master)  │                  │ (Checker) │         │
+  │      │  Execute  │                  │  Execute  │         │
+  │      └─────┬─────┘                  └─────┬─────┘         │
+  │            │                               │               │
+  │            └───────────────┬───────────────┘               │
+  │                            │                               │
+  │                     ┌──────▼──────┐                        │
+  │                     │ Comparator  │                        │
+  │                     └──────┬──────┘                        │
+  │                            │                               │
+  │                  ┌──────────┴──────────┐                   │
+  │                  │                     │                   │
+  │               MATCH                MISMATCH                │
+  │                  │                     │                   │
+  │            Continue                SMU Alarm                │
+  │                                  → Safe Reaction             │
+  └──────────────────────────────────────────────────────────┘
+```
 
-
-CPU0 provides startup information to other CPUs.
-
+> Lockstep is a **different concept from multi-core task distribution.** Multi-core uses
+> separate CPUs running *different* code for *performance*. Lockstep uses a CPU paired
+> with a hidden checker core running the *same* code for *safety*. A full deep-dive on
+> lockstep and the broader ASIL-D safety architecture is in the dedicated **Safety
+> Architecture** document.
 
 ---
 
-# 10. Inter-Core Communication
+## 18 · Automotive Example — Vehicle Controller
 
-
-Cores must exchange information.
-
-
-Methods:
-
-
-- Shared memory
-- Interrupts
-- Spinlocks
-- DMA
-
-
-Example:
-
-
-```text
-
-CPU0
-
-Motor Control
-
-
-CPU1
-
-CAN Communication
-
+Putting it all together — a complete multi-core vehicle controller:
 
 ```
+  ┌────────────────────────────────────────────────────────────────┐
+  │                       AURIX Vehicle Controller                 │
+  │                                                                  │
+  │  ┌────────────┐    ┌────────────┐    ┌────────────┐            │
+  │  │   CPU0     │    │   CPU1     │    │   CPU2     │            │
+  │  │            │    │            │    │            │            │
+  │  │  Motor     │    │  Comms     │    │ Diagnostics│            │
+  │  │  Control   │    │  Gateway   │    │            │            │
+  │  └─────┬──────┘    └─────┬──────┘    └─────┬──────┘            │
+  │        │                  │                  │                  │
+  │        └──────────────────┼──────────────────┘                  │
+  │                           │                                     │
+  │                    ┌──────▼──────┐                              │
+  │                    │     LMU     │                              │
+  │                    │ Shared      │                              │
+  │                    │ Vehicle Data│                              │
+  │                    └─────────────┘                              │
+  └────────────────────────────────────────────────────────────────┘
 
-
-They need to exchange data.
-
+  CPU0 writes computed torque/speed → LMU
+  CPU1 reads vehicle data → broadcasts over CAN FD to other ECUs
+  CPU2 reads vehicle data → logs to DFlash for diagnostic history
+```
 
 ---
 
-# 11. Shared Memory Communication
+## 19 · Summary
 
-
-Example:
-
-
-CPU0 writes:
-
-
-```text
-
-LMU
-
-
-+----------------+
-
-| Vehicle Speed  |
-
-+----------------+
-
+### Private Resources (per CPU)
 
 ```
-
-
-CPU1 reads:
-
-
-```text
-
-Vehicle Speed
-
-
+  Registers   D0–D15, A0–A15 — zero-cycle access
+  CSA         Independent context pool per core
+  Cache       I-Cache + D-Cache, hardware-managed
+  PSPR        Local fast program RAM, deterministic
+  DSPR        Local fast data RAM, deterministic
 ```
 
-
-Flow:
-
-
-```text
-
-CPU0
-
-Write Data
-
-
- |
-
- v
-
-
-LMU
-
-
- |
-
- v
-
-
-CPU1
-
-Read Data
-
+### Shared Resources (all CPUs)
 
 ```
+  LMU          Shared RAM for inter-core data
+  Flash        PFlash (code) + DFlash (persistent data)
+  Peripherals  CAN, SPI, ADC, UART, Ethernet — via SPB
+  SRI          High-speed crossbar connecting everything
+```
 
+### Communication Methods
+
+```
+  Shared Memory   Passive data exchange via LMU
+  Interrupts      Active event notification (software-triggered)
+  Spinlocks       Mutual exclusion for short critical sections
+  DMA             Zero-CPU-cost bulk data transfer
+```
+
+### Safety Features
+
+```
+  Lockstep          Dual-execution CPU fault detection
+  ECC               Memory corruption detection/correction
+  Fault Detection   SMU-coordinated alarm and reaction
+```
+
+### The Core Equation
+
+```
+  ┌──────────────────────────────────────────────────────────┐
+  │                                                            │
+  │   Multiple Independent Cores                               │
+  │              +                                              │
+  │   Fast Private Local Memory  (PSPR/DSPR per core)          │
+  │              +                                              │
+  │   Shared Communication Fabric  (LMU, SRI, SPB)              │
+  │              +                                              │
+  │   Hardware Safety Mechanisms  (Lockstep, ECC, SMU)          │
+  │              =                                              │
+  │   Real-Time, Safety-Certified Automotive Computing Platform │
+  │                                                              │
+  └──────────────────────────────────────────────────────────┘
+```
+
+### What Comes Next
+
+| Topic | Why It Matters |
+|---|---|
+| **GTM (Generic Timer Module)** | PWM generation, motor control timing, input capture |
+| **CCU6 / Capture Compare** | 3-phase motor control, encoder interfaces |
+| **VADC (Versatile ADC)** | Multi-group ADC architecture and queue handling |
+| **AUTOSAR Multi-Core OS** | How OS-level scheduling maps to TriCore's core model |
+| **Safety Architecture (ASIL-D)** | Deep dive into lockstep, SMU, and fault reaction |
 
 ---
 
-# 12. Synchronization Between Cores
-
-
-Problem:
-
-
-Two CPUs access the same resource.
-
-
-Example:
-
-
-```text
-
-CPU0:
-
-counter++
-
-
-
-CPU1:
-
-counter++
-
-
-```
-
-
-Possible result:
-
-
-```
-Race Condition
-```
-
-
-Solutions:
-
-
-- Spinlocks
-- Mutex
-- Atomic operations
-
-
----
-
-# 13. Spinlocks
-
-
-A spinlock allows one CPU to access a resource.
-
-
-Example:
-
-
-```text
-
-CPU0
-
-
-Acquire Lock
-
-
-      |
-
-
-Access Shared Resource
-
-
-      |
-
-
-Release Lock
-
-
-
-CPU1
-
-
-Wait
-
-
-
-```
-
-
----
-
-# 14. Interrupt-Based Communication
-
-
-One core can notify another core.
-
-
-Example:
-
-
-```text
-
-CPU0
-
-
-Data Ready
-
-
- |
-
- v
-
-
-Interrupt
-
-
- |
-
- v
-
-
-CPU1
-
-
-Process Data
-
-
-```
-
-
-Used for:
-
-
-- Events
-- Notifications
-- Commands
-
-
----
-
-# 15. DMA Communication
-
-
-DMA can move data without CPU processing.
-
-
-Example:
-
-
-```text
-
-CPU0
-
-
-Data Buffer
-
-
- |
-
- v
-
-
-DMA
-
-
- |
-
- v
-
-
-CPU1 Memory
-
-
-```
-
-
-Benefits:
-
-
-- Faster transfer
-- Less CPU usage
-
-
----
-
-# 16. Multi-Core Task Distribution Example
-
-
-Example automotive ECU:
-
-
-```text
-
-              AURIX
-
-
-
-CPU0
-
- |
-
- +--> Motor Control
-
- +--> Safety Functions
-
-
-
-CPU1
-
- |
-
- +--> CAN
-
- +--> Ethernet
-
-
-
-CPU2
-
- |
-
- +--> Diagnostics
-
- +--> Logging
-
-
-
-```
-
-
-Each core handles specific responsibilities.
-
-
----
-
-# 17. Lockstep Architecture
-
-
-Some AURIX devices support lockstep.
-
-
-Two CPUs execute the same instructions.
-
-
-Example:
-
-
-```text
-
-
-             Program
-
-
-                |
-
-
-        ----------------
-
-
-        |              |
-
-
-       CPU0           CPU1
-
-
-     Execute        Execute
-
-
-        |              |
-
-
-        ---- Compare ---
-
-
-
-```
-
-
-If results differ:
-
-
-```text
-
-Fault Detected
-
-
-```
-
-
-Used for:
-
-
-- Safety systems
-- ASIL applications
-
-
----
-
-# 18. Automotive Example
-
-
-Vehicle controller:
-
-
-```text
-
-                  AURIX
-
-
-CPU0
-
- |
-
-Motor Control
-
-
-CPU1
-
- |
-
-Communication Gateway
-
-
-CPU2
-
- |
-
-Diagnostics
-
-
-      
-
-
-LMU
-
- |
-
-Shared Vehicle Data
-
-
-
-```
-
-
----
-
-# 19. Summary
-
-
-AURIX multi-core architecture provides:
-
-
-## Private Resources
-
-
-```text
-
-Registers
-
-CSA
-
-Cache
-
-PSPR
-
-DSPR
-
-```
-
-
-## Shared Resources
-
-
-```text
-
-LMU
-
-Flash
-
-Peripherals
-
-SRI
-
-```
-
-
-## Communication Methods
-
-
-```text
-
-Shared Memory
-
-Interrupts
-
-Spinlocks
-
-DMA
-
-```
-
-
-## Safety Features
-
-
-```text
-
-Lockstep
-
-ECC
-
-Fault Detection
-
-```
-
-
-The main idea:
-
-
-```text
-
-Multiple Cores
-
-+
-
-Fast Local Memory
-
-+
-
-Shared Communication
-
-+
-
-Safety Mechanisms
-
-
-=
-
-Real-Time Automotive Computing Platform
-
-
-```
+*Infineon AURIX & TriCore Architecture Series — Part 6 of N*
+*Based on publicly available Infineon AURIX TC3xx User Manual and TriCore Architecture documentation.*
