@@ -1,29 +1,35 @@
 # AURIX TriCore Safety Architecture (ASIL-D)
+### Part 7 — Lockstep, ECC, SMU, Watchdogs & Functional Safety Mechanisms
 
-> A comprehensive guide to functional safety mechanisms in Infineon AURIX microcontrollers,
-> targeting ISO 26262 ASIL-D compliance for automotive-grade embedded systems.
+> A microcontroller that merely computes correctly is not enough for a brake, steering,
+> or motor control system. AURIX is engineered around a different question entirely:
+> *what happens when something fails?* This is the layered hardware and software
+> architecture that lets AURIX answer that question safely, every time, and achieve
+> **ISO 26262 ASIL-D** — the highest automotive safety integrity level.
 
 ---
 
 ## Table of Contents
 
-1. [Introduction to Functional Safety](#1-introduction-to-functional-safety)
-2. [What is ASIL-D?](#2-what-is-asil-d)
-3. [Why AURIX Needs Safety Architecture](#3-why-aurix-needs-safety-architecture)
-4. [Safety Concept Overview](#4-safety-concept-overview)
-5. [AURIX Safety Mechanisms](#5-aurix-safety-mechanisms)
-   - 5.1 [Lockstep CPU](#51-lockstep-cpu)
-   - 5.2 [Error Correction Code (ECC)](#52-error-correction-code-ecc)
-   - 5.3 [Safety Management Unit (SMU)](#53-safety-management-unit-smu)
-   - 5.4 [Watchdog System](#54-watchdog-system)
-   - 5.5 [ENDINIT Protection](#55-endinit-protection)
-   - 5.6 [Redundant Hardware](#56-redundant-hardware)
-6. [Fault Detection and Reaction Flow](#6-fault-detection-and-reaction-flow)
-7. [Memory Safety Architecture](#7-memory-safety-architecture)
-8. [Multi-Core Safety Concept](#8-multi-core-safety-concept)
-9. [ASIL-D Software Architecture](#9-asil-d-software-architecture)
-10. [Automotive Example: EV Motor Controller](#10-automotive-example-ev-motor-controller)
-11. [Summary](#11-summary)
+| # | Topic |
+|---|---|
+| 1 | [Introduction to Functional Safety](#1--introduction-to-functional-safety) |
+| 2 | [What is ASIL-D?](#2--what-is-asil-d) |
+| 3 | [Why AURIX Needs Safety Architecture](#3--why-aurix-needs-safety-architecture) |
+| 4 | [Safety Concept Overview](#4--safety-concept-overview) |
+| 5 | [AURIX Safety Mechanisms](#5--aurix-safety-mechanisms) |
+| | 5.1 [Lockstep CPU](#51--lockstep-cpu) |
+| | 5.2 [Error Correction Code (ECC)](#52--error-correction-code-ecc) |
+| | 5.3 [Safety Management Unit (SMU)](#53--safety-management-unit-smu) |
+| | 5.4 [Watchdog System](#54--watchdog-system) |
+| | 5.5 [ENDINIT Protection](#55--endinit-protection) |
+| | 5.6 [Redundant Hardware](#56--redundant-hardware) |
+| 6 | [Fault Detection and Reaction Flow](#6--fault-detection-and-reaction-flow) |
+| 7 | [Memory Safety Architecture](#7--memory-safety-architecture) |
+| 8 | [Multi-Core Safety Concept](#8--multi-core-safety-concept) |
+| 9 | [ASIL-D Software Architecture](#9--asil-d-software-architecture) |
+| 10 | [Automotive Example: EV Motor Controller](#10--automotive-example-ev-motor-controller) |
+| 11 | [Summary](#11--summary) |
 
 ---
 
